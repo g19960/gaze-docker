@@ -1,0 +1,33 @@
+# Binaries
+*.exe
+gaze-docker
+gaze-docker-*
+
+# Docker image tar
+*.tar
+
+# Build output
+dist/
+
+# Logs
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (internal, not for open source)
+CLAUDE.md
+.claude/
+
+# Misc temp files
+*.png
+test.txt
+after-filter.md
+before-click-filtered.md

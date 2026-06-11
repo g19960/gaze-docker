@@ -1,0 +1,34 @@
+version: "3.8"
+
+services:
+  gaze-docker:
+    image: gaze-docker:local
+    container_name: gaze-docker
+    restart: unless-stopped
+
+    ports:
+      # Host port : Container port
+      # Change the right side if PORT below is modified
+      - "8080:8080"
+
+    environment:
+      # Web server listening port
+      # Default: 8080
+      PORT: "8080"
+
+      # Enable password authentication
+      # Values: false / 0 (disabled) | true / 1 (enabled)
+      # Default: false
+      AUTH: "true"
+
+      # Password rotation interval for viewer/admin credentials
+      # Go duration format: 30m, 1h, 12h, 24h
+      # Default: 1h
+      AUTH_ROTATE: "1h"
+
+    volumes:
+      # Required: allows gaze-docker to access the host Docker daemon
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # Optional: sync timezone with host
+      # - /etc/localtime:/etc/localtime:ro

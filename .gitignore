@@ -27,7 +27,6 @@ CLAUDE.md
 .claude/
 
 # Misc temp files
-*.png
 test.txt
 after-filter.md
 before-click-filtered.md

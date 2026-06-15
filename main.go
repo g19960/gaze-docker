@@ -242,6 +242,7 @@ type Container struct {
 	Status    string `json:"status"`
 	State     string `json:"state"`
 	Created   string `json:"created"`
+	Ports     string `json:"ports"`
 	Sensitive bool   `json:"sensitive,omitempty"`
 }
 
@@ -264,7 +265,7 @@ func parseSensitivity(labels string) bool {
 func listContainers(role string) ([]Container, error) {
 	cmd := exec.Command(
 		"docker", "ps", "-a",
-		"--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.RunningFor}}\t{{.Labels}}",
+		"--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.RunningFor}}\t{{.Labels}}\t{{.Ports}}",
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -284,6 +285,11 @@ func listContainers(role string) ([]Container, error) {
 			continue
 		}
 
+		ports := ""
+		if len(parts) >= 8 {
+			ports = parts[7]
+		}
+
 		containers = append(containers, Container{
 			ID:        parts[0],
 			Name:      parts[1],
@@ -291,6 +297,7 @@ func listContainers(role string) ([]Container, error) {
 			Status:    parts[3],
 			State:     parts[4],
 			Created:   parts[5],
+			Ports:     ports,
 			Sensitive: sensitive,
 		})
 	}
@@ -1535,6 +1542,86 @@ func handleContainerStats(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(stats)
 }
 
+type CleanupImage struct {
+	ID   string `json:"id"`
+	Repo string `json:"repo"`
+	Tag  string `json:"tag"`
+	Size string `json:"size"`
+}
+
+func parseImageLines(out string) []CleanupImage {
+	var imgs []CleanupImage
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		parts := strings.Split(scanner.Text(), "\t")
+		if len(parts) < 4 {
+			continue
+		}
+		imgs = append(imgs, CleanupImage{ID: parts[0], Repo: parts[1], Tag: parts[2], Size: parts[3]})
+	}
+	return imgs
+}
+
+func handleImagesCleanup(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req struct {
+			IDs []string `json:"ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		var results []string
+		for _, id := range req.IDs {
+			out, err := exec.Command("docker", "rmi", id).CombinedOutput()
+			if err != nil {
+				results = append(results, id+": "+strings.TrimSpace(string(out)))
+				recordAudit(r, "image.delete", id, false, string(out))
+			} else {
+				results = append(results, id+": ok")
+				recordAudit(r, "image.delete", id, true, string(out))
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "results": results})
+		return
+	}
+	// GET: list dangling + unused
+	danglingOut, _ := exec.Command("docker", "images", "--filter", "dangling=true", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}").Output()
+	allOut, _ := exec.Command("docker", "images", "--format", "{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}").Output()
+	usedOut, _ := exec.Command("docker", "ps", "-a", "--format", "{{.Image}}").Output()
+	used := map[string]bool{}
+	for _, img := range strings.Fields(string(usedOut)) {
+		used[img] = true
+	}
+	dangling := parseImageLines(string(danglingOut))
+	var unused []CleanupImage
+	for _, img := range parseImageLines(string(allOut)) {
+		if used[img.Repo+":"+img.Tag] || used[img.Repo] || used[img.ID] {
+			continue
+		}
+		isDangling := false
+		for _, d := range dangling {
+			if d.ID == img.ID {
+				isDangling = true
+				break
+			}
+		}
+		if !isDangling {
+			unused = append(unused, img)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"dangling": dangling,
+		"unused":   unused,
+	})
+}
+
 func handleImageInspect(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1825,6 +1912,7 @@ func main() {
 	mux.HandleFunc("/api/networks/delete", handleNetworkDelete)
 	mux.HandleFunc("/api/containers/stats", handleContainerStats)
 	mux.HandleFunc("/api/images/inspect", handleImageInspect)
+	mux.HandleFunc("/api/images/cleanup", handleImagesCleanup)
 	mux.HandleFunc("/api/exec", handleExec)
 	mux.HandleFunc("/api/templates", handleTemplates)
 	mux.HandleFunc("/api/templates/delete", handleTemplateDelete)

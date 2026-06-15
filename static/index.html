@@ -290,6 +290,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
         <button class="btn on" id="btnAS" onclick="toggleAS()">autoscroll</button>
         <button class="btn" id="btnLoadMore" onclick="loadMoreHistory()" style="display:none">load more</button>
         <button class="btn" onclick="downloadLog()">download</button>
+        <button class="btn" id="btnFmt" onclick="toggleExportFormat()">text</button>
         <button class="btn" onclick="clearLog()">clear</button>
       </div>
     </div>
@@ -304,6 +305,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
   <div class="images-toolbar">
     <button class="btn" onclick="showLoadModal()">load image</button>
     <button class="btn" onclick="showDeployModal()">deploy</button>
+    <button class="btn" onclick="showCleanupModal()">cleanup</button>
     <button class="btn" onclick="loadImages()">refresh</button>
     <span style="margin-left:auto;font-size:10px;color:var(--text-muted)" id="imgCount"></span>
   </div>
@@ -419,6 +421,7 @@ services:
 <div class="modal-overlay" id="containerInspectModal">
   <div class="modal" style="width:min(900px,94vw)">
     <h2>Container Inspect</h2>
+    <div id="portsSection" style="margin-bottom:10px"></div>
     <pre class="inspect-pre" id="containerInspectPre">Loading...</pre>
     <div class="stat-chart" id="containerChart"></div>
     <div class="modal-actions">
@@ -488,6 +491,17 @@ services:
     </div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal('alertRulesModal')">close</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="cleanupModal">
+  <div class="modal" style="width:min(700px,94vw)">
+    <h2>Image Cleanup</h2>
+    <div id="cleanupContent"><div class="loading"><span class="spin"></span>&nbsp;Loading...</div></div>
+    <div class="modal-actions">
+      <span id="cleanupTotal" style="margin-right:auto;font-size:11px;color:var(--cyan)"></span>
+      <button class="btn" onclick="closeModal('cleanupModal')">close</button>
+      <button class="btn-danger" id="btnCleanupDelete" onclick="deleteCleanupSelected()">delete selected</button>
     </div>
   </div>
 </div>
@@ -779,17 +793,24 @@ function render(list){
       '<div class="item-name">'+esc(c.name)+'</div>'+
       '<div class="item-meta"><span class="badge '+c.state+'">'+c.state+'</span>'+healthDot(c.id)+
       '<span class="img-text">'+esc(c.image)+'</span></div>'+
+      (c.ports?'<div class="item-meta" style="margin-top:3px;font-size:9px;color:var(--cyan)">'+esc(c.ports.substring(0,60))+'</div>':'')+
       '<span class="img-text">'+esc(c.image)+'</span></div>'+
       '<div class="item-meta" style="margin-top:3px;font-size:10px;color:var(--text-muted)">'+esc(c.created)+'</div>'+actions+
       '</div>';
   }).join('');
 }
 
+var sseRebuildTimer=null;
 function startSSE(){
   if(sseSource){sseSource.close();}
+  if(sseRebuildTimer){clearTimeout(sseRebuildTimer);sseRebuildTimer=null;}
   var url='/api/refresh';
   if(authToken)url+='?token='+encodeURIComponent(authToken);
   sseSource=new EventSource(url);
+  sseSource.onopen=function(){
+    var d=document.getElementById('sseDot');
+    d.style.background='var(--green)';d.style.boxShadow='0 0 6px var(--green)';
+  };
   sseSource.onmessage=function(e){
     containers=JSON.parse(e.data)||[];
     renderFiltered();
@@ -798,6 +819,8 @@ function startSSE(){
   sseSource.onerror=function(){
     var d=document.getElementById('sseDot');
     d.style.background='var(--red)';d.style.boxShadow='0 0 6px var(--red)';
+    if(sseSource){sseSource.close();sseSource=null;}
+    if(!sseRebuildTimer){sseRebuildTimer=setTimeout(function(){sseRebuildTimer=null;startSSE();},5000);}
   };
 }
 
@@ -824,17 +847,29 @@ function syncActiveSelection(){
   });
 }
 
+var wsReconnectTimer=null,wsReconnectDelay=1000,wsWantClose=false;
 function connectWS(id){
-  if(ws){ws.close();ws=null;}
+  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
+  if(ws){wsWantClose=true;ws.close();ws=null;}
+  wsWantClose=false;
   setWS('connecting');
   var proto=location.protocol==='https:'?'wss':'ws';
   var url=proto+'://'+location.host+'/api/logs?id='+id;
   if(authToken)url+='&token='+encodeURIComponent(authToken);
-  ws=new WebSocket(url);
-  ws.onopen=function(){setWS('connected');};
+  try{ws=new WebSocket(url);}catch(e){scheduleReconnect(id);return;}
+  ws.onopen=function(){wsReconnectDelay=1000;setWS('connected');};
   ws.onmessage=function(e){appendLine(e.data);};
-  ws.onclose=function(){setWS('disconnected');};
-  ws.onerror=function(){setWS('disconnected');};
+  ws.onclose=function(){if(!wsWantClose){setWS('reconnecting');scheduleReconnect(id);}else{setWS('disconnected');}};
+  ws.onerror=function(){};
+}
+function scheduleReconnect(id){
+  if(wsReconnectTimer)clearTimeout(wsReconnectTimer);
+  setWS('reconnecting ('+Math.round(wsReconnectDelay/1000)+'s)');
+  wsReconnectTimer=setTimeout(function(){
+    wsReconnectTimer=null;
+    wsReconnectDelay=Math.min(wsReconnectDelay*2,30000);
+    connectWS(id);
+  },wsReconnectDelay);
 }
 
 function appendLine(raw,prepend){
@@ -944,18 +979,26 @@ async function loadMoreHistory(){
   historyLoading=false;
 }
 
+var exportFormat='text';
+function toggleExportFormat(){exportFormat=exportFormat==='text'?'json':'text';document.getElementById('btnFmt').textContent=exportFormat;}
 function downloadLog(){
   var lines=document.querySelectorAll('#out .line:not(.hidden)');
   var parts=[];
   for(var i=0;i<lines.length;i++){
     var ts=lines[i].querySelector('.ts').textContent;
     var msg=lines[i].querySelector('.msg').textContent;
-    parts.push((ts?ts+' ':'')+msg);
+    var level=lines[i].getAttribute('data-level')||'';
+    if(exportFormat==='json'){
+      parts.push(JSON.stringify({ts:ts,msg:msg,level:level}));
+    }else{
+      parts.push((ts?ts+' ':'')+msg);
+    }
   }
-  var blob=new Blob([parts.join('\n')],{type:'text/plain'});
+  var blob=new Blob([parts.join('\n')],{type:exportFormat==='json'?'application/json':'text/plain'});
   var a=document.createElement('a');
   var name=activeId?activeId:'log';
-  a.download=name+'-'+new Date().toISOString().replace(/[:.]/g,'-')+'.log';
+  var ext=exportFormat==='json'?'jsonl':'log';
+  a.download=name+'-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+ext;
   a.href=URL.createObjectURL(blob);
   a.click();
   URL.revokeObjectURL(a.href);
@@ -1070,12 +1113,27 @@ async function containerAction(id,action,event){
 }
 
 var chartTimer=null,chartCpu=[],chartMem=[],chartId='';
+function renderPorts(portsStr){
+  var el=document.getElementById('portsSection');
+  if(!portsStr){el.innerHTML='';return;}
+  var mappings=portsStr.split(',').map(function(s){return s.trim();}).filter(Boolean);
+  var html='<div class="modal-label">Ports</div><div style="display:flex;flex-wrap:wrap;gap:6px">';
+  mappings.forEach(function(m){
+    html+='<button class="mini-btn" onclick="copyPort(\''+esc(m)+'\')" style="text-transform:none">'+esc(m)+'</button>';
+  });
+  html+='</div>';
+  el.innerHTML=html;
+}
+function copyPort(p){navigator.clipboard.writeText(p);showToast('copied: '+p,'ok');}
 async function showContainerInspect(id,event){
   if(event)event.stopPropagation();
   chartId=id;chartCpu=[];chartMem=[];
   document.getElementById('containerInspectModal').classList.add('show');
   document.getElementById('containerInspectPre').textContent=t('loading');
   document.getElementById('containerChart').innerHTML='<svg class="chart-svg" id="chartSvg" viewBox="0 0 200 40" preserveAspectRatio="none"></svg><div class="chart-legend"><span style="color:var(--green)">■ CPU</span><span style="color:var(--cyan)">■ MEM</span></div>';
+  var c=null;
+  for(var i=0;i<containers.length;i++){if(containers[i].id===id){c=containers[i];break;}}
+  renderPorts(c?c.ports:'');
   startChartPolling();
   try{
     var url='/api/containers/inspect?id='+encodeURIComponent(id);
@@ -1552,6 +1610,52 @@ function matchAlertRules(container,msg){
   });
 }
 
+// Image cleanup
+function showCleanupModal(){document.getElementById('cleanupModal').classList.add('show');loadCleanup();}
+async function loadCleanup(){
+  document.getElementById('cleanupContent').innerHTML='<div class="loading"><span class="spin"></span>&nbsp;Loading...</div>';
+  document.getElementById('cleanupTotal').textContent='';
+  var url='/api/images/cleanup';
+  if(authToken)url+='?token='+encodeURIComponent(authToken);
+  try{
+    var r=await fetch(url);
+    var d=await r.json()||{};
+    renderCleanup(d);
+  }catch(e){document.getElementById('cleanupContent').innerHTML='<div style="color:var(--red);padding:12px">Failed to load</div>';}
+}
+function cleanupRow(img){
+  return '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--bg3)">'+
+    '<input type="checkbox" value="'+esc(img.id)+'" class="cleanup-check">'+
+    '<span class="img-repo" style="flex:1">'+esc(img.repo)+':'+esc(img.tag)+'</span>'+
+    '<span class="img-size">'+esc(img.size)+'</span></label>';
+}
+function renderCleanup(d){
+  var html='';
+  if(d.dangling&&d.dangling.length){
+    html+='<div class="modal-label">Dangling ('+d.dangling.length+')</div>';
+    d.dangling.forEach(function(img){html+=cleanupRow(img);});
+  }
+  if(d.unused&&d.unused.length){
+    html+='<div class="modal-label" style="margin-top:12px">Unused / no container ('+d.unused.length+')</div>';
+    d.unused.forEach(function(img){html+=cleanupRow(img);});
+  }
+  if(!html){html='<div style="color:var(--text-muted);padding:12px">Nothing to clean 🎉</div>';}
+  document.getElementById('cleanupContent').innerHTML=html;
+  var total=(d.dangling||[]).length+(d.unused||[]).length;
+  document.getElementById('cleanupTotal').textContent=total+' images';
+}
+async function deleteCleanupSelected(){
+  var ids=[];
+  document.querySelectorAll('.cleanup-check:checked').forEach(function(c){ids.push(c.value);});
+  if(!ids.length){showToast('select at least one','err');return;}
+  if(!confirm('Delete '+ids.length+' image(s)?'))return;
+  var url='/api/images/cleanup';
+  if(authToken)url+='?token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:ids})});
+  var d=await r.json();
+  if(d.ok){showToast(t('operationDone'),'ok');loadCleanup();loadImages();}else{showToast(t('operationFailed'),'err');}
+}
+
 // System prune
 async function systemPrune(){
   if(!confirm('Prune ALL unused images, containers, networks, volumes and build cache?'))return;
@@ -1581,15 +1685,20 @@ window.setInterval(function(){
 },10000);
 
 // Event stream
-var eventSource=null;
+var eventSource=null,eventRebuildTimer=null;
 function startEvents(){
   if(eventSource){eventSource.close();}
+  if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
   if(mockMode)return;
   var url='/api/events';
   if(authToken)url+='?token='+encodeURIComponent(authToken);
   eventSource=new EventSource(url);
   eventSource.onmessage=function(e){
     try{var evt=JSON.parse(e.data);showEvent(evt);}catch(err){}
+  };
+  eventSource.onerror=function(){
+    if(eventSource){eventSource.close();eventSource=null;}
+    if(!eventRebuildTimer){eventRebuildTimer=setTimeout(function(){eventRebuildTimer=null;startEvents();},5000);}
   };
 }
 function showEvent(evt){

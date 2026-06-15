@@ -165,6 +165,18 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
 .file-name{flex:1;color:var(--text)}
 .file-size{font-size:10px;color:var(--text-muted)}
 .file-up{color:var(--cyan)}
+.level-filter{display:flex;gap:4px}
+.mini-btn.active{border-color:var(--green);color:var(--green);background:rgba(0,255,136,.08)}
+.line-actions{display:none;gap:4px;margin-left:8px}
+.line:hover .line-actions{display:inline-flex}
+.stat-chart{display:flex;align-items:flex-end;gap:3px;height:48px;padding:8px 0}
+.stat-chart-bar{flex:1;background:var(--green);border-radius:2px 2px 0 0;min-height:2px;opacity:.7;transition:height .3s}
+.terminal{background:#000;color:#0f0;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:12px;padding:10px;border-radius:6px;height:60vh;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
+.terminal-input{width:100%;background:#000;border:1px solid var(--border);border-radius:4px;padding:8px;color:#0f0;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:12px;outline:none;margin-top:8px}
+.template-card{border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px;background:var(--bg2)}
+.template-card-name{font-weight:500;color:var(--cyan);margin-bottom:6px}
+.json-toggle{color:var(--yellow);cursor:pointer;font-size:10px;margin-right:6px}
+.copy-btn{padding:1px 5px;font-size:9px}
 @media (max-width: 900px) {
   .header{padding:10px 12px;gap:10px}
   .mobile-sidebar-btn{display:inline-flex;align-items:center;justify-content:center}
@@ -214,6 +226,9 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
 <div class="tab-bar" id="tabBar">
   <button class="tab active" data-tab="containers" onclick="switchTab('containers')">Containers</button>
   <button class="tab" id="tabImages" data-tab="images" onclick="switchTab('images')" style="display:none">Images</button>
+  <button class="tab" id="tabCompose" data-tab="compose" onclick="switchTab('compose')" style="display:none">Compose</button>
+  <button class="tab" id="tabVolumes" data-tab="volumes" onclick="switchTab('volumes')" style="display:none">Volumes</button>
+  <button class="tab" id="tabNetworks" data-tab="networks" onclick="switchTab('networks')" style="display:none">Networks</button>
   <button class="tab" id="tabAudit" data-tab="audit" onclick="switchTab('audit')" style="display:none">Audit</button>
 </div>
 <div class="layout" id="containersPanel">
@@ -247,6 +262,13 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
           <span class="font-size-label" id="fontLabel">13</span>
           <button class="btn" onclick="adjustFont(1)">+</button>
         </div>
+        <div class="level-filter">
+          <button class="mini-btn" data-level="all" onclick="filterLevel('all')">all</button>
+          <button class="mini-btn" data-level="err" onclick="filterLevel('err')">err</button>
+          <button class="mini-btn" data-level="warn" onclick="filterLevel('warn')">warn</button>
+          <button class="mini-btn" data-level="info" onclick="filterLevel('info')">info</button>
+        </div>
+        <button class="btn" id="btnPause" onclick="togglePause()">pause</button>
         <button class="btn on" id="btnAS" onclick="toggleAS()">autoscroll</button>
         <button class="btn" id="btnLoadMore" onclick="loadMoreHistory()" style="display:none">load more</button>
         <button class="btn" onclick="downloadLog()">download</button>
@@ -283,6 +305,44 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
     <table class="images-table">
       <thead><tr><th>Time</th><th>Role</th><th>Remote</th><th>Action</th><th>Target</th><th>Result</th><th>Output</th></tr></thead>
       <tbody id="auditBody"><tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:20px">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+<div class="audit-panel" id="composePanel">
+  <div class="images-toolbar">
+    <button class="btn" onclick="loadCompose()">refresh</button>
+    <button class="btn" onclick="showTemplateModal()">templates</button>
+    <span style="margin-left:auto;font-size:10px;color:var(--text-muted)" id="composeCount"></span>
+  </div>
+  <div class="images-table-wrap">
+    <table class="images-table">
+      <thead><tr><th>Name</th><th>Status</th><th>Services</th><th>Config</th><th></th></tr></thead>
+      <tbody id="composeBody"><tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+<div class="audit-panel" id="volumesPanel">
+  <div class="images-toolbar">
+    <button class="btn" onclick="loadVolumes()">refresh</button>
+    <button class="btn-danger" onclick="pruneVolumes()">prune unused</button>
+    <span style="margin-left:auto;font-size:10px;color:var(--text-muted)" id="volumeCount"></span>
+  </div>
+  <div class="images-table-wrap">
+    <table class="images-table">
+      <thead><tr><th>Name</th><th>Driver</th><th>Mountpoint</th><th></th></tr></thead>
+      <tbody id="volumesBody"><tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:20px">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+<div class="audit-panel" id="networksPanel">
+  <div class="images-toolbar">
+    <button class="btn" onclick="loadNetworks()">refresh</button>
+    <span style="margin-left:auto;font-size:10px;color:var(--text-muted)" id="networkCount"></span>
+  </div>
+  <div class="images-table-wrap">
+    <table class="images-table">
+      <thead><tr><th>ID</th><th>Name</th><th>Driver</th><th>Scope</th><th></th></tr></thead>
+      <tbody id="networksBody"><tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">Loading...</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -342,14 +402,57 @@ services:
   <div class="modal" style="width:min(900px,94vw)">
     <h2>Container Inspect</h2>
     <pre class="inspect-pre" id="containerInspectPre">Loading...</pre>
+    <div class="stat-chart" id="containerChart"></div>
     <div class="modal-actions">
       <button class="btn" onclick="closeModal('containerInspectModal')">close</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="imageInspectModal">
+  <div class="modal" style="width:min(900px,94vw)">
+    <h2>Image Inspect</h2>
+    <pre class="inspect-pre" id="imageInspectPre">Loading...</pre>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('imageInspectModal')">close</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="networkInspectModal">
+  <div class="modal" style="width:min(900px,94vw)">
+    <h2>Network Inspect</h2>
+    <pre class="inspect-pre" id="networkInspectPre">Loading...</pre>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('networkInspectModal')">close</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="execModal">
+  <div class="modal" style="width:min(800px,94vw)">
+    <h2 id="execTitle">Terminal</h2>
+    <div class="terminal" id="terminalOut"></div>
+    <input class="terminal-input" id="terminalInput" placeholder="type command and press enter..." onkeydown="if(event.key==='Enter'){sendExecCmd(this.value);this.value=''}">
+    <div class="modal-actions">
+      <button class="btn" onclick="closeExecModal()">close</button>
+    </div>
+  </div>
+</div>
+<div class="modal-overlay" id="templateModal">
+  <div class="modal" style="width:min(700px,94vw)">
+    <h2>Compose Templates</h2>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input class="modal-input" id="tplName" placeholder="template name" style="flex:1">
+      <button class="btn" style="border-color:var(--green);color:var(--green)" onclick="saveTemplate()">save</button>
+    </div>
+    <div id="templateList"></div>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeModal('templateModal')">close</button>
     </div>
   </div>
 </div>
 <script>
 var ws=null,activeId=null,autoScroll=true,lineCount=0,containers=[];
 var logFilterQuery='',logFilterRegex=false,historyTail=500,historyLoading=false;
+var logPaused=false,levelFilter='all',notifyEnabled=false;
 var authToken=sessionStorage.getItem('token')||'';
 var authRole=sessionStorage.getItem('role')||'';
 var mockMode=sessionStorage.getItem('mockMode')==='true';
@@ -383,8 +486,8 @@ var mockLogs=[
 ];
 var lang=localStorage.getItem('lang')||'zh';
 var I18N={
-  zh:{containers:'容器',images:'镜像',audit:'审计',hide:'隐藏',dark:'深色',light:'浅色',password:'密码',login:'登录',filterContainers:'过滤容器...',filterLogs:'过滤日志...',loading:'加载中...',noContainers:'未找到容器',selectContainer:'选择容器查看日志',lines:'行',autoscroll:'自动滚动',loadMore:'加载更多',download:'下载',clear:'清空',loadImage:'导入镜像',deploy:'部署',refresh:'刷新',repository:'仓库',tag:'标签',size:'大小',created:'创建时间',time:'时间',role:'角色',remote:'来源',action:'操作',target:'目标',result:'结果',output:'输出',success:'成功',failed:'失败',noAudit:'暂无审计记录',dropTar:'拖拽 .tar 文件到这里，或点击选择',uploading:'上传中...',cancel:'取消',imageLabel:'镜像（如果提供 compose，可选）',composeLabel:'Docker Compose YAML',uploadCompose:'或上传 compose 文件',deploying:'部署中...',imageFiles:'镜像文件',close:'关闭',adminRequired:'需要 admin 权限',noImages:'未找到镜像',delete:'删除',browse:'浏览',emptyDir:'空目录',imageDeleted:'镜像已删除',deleteFailed:'删除失败',imageLoaded:'镜像已导入',loadFailed:'导入失败',uploadFailed:'上传失败',deployed:'部署成功',deployFailed:'部署失败',provideDeploy:'请填写镜像或 compose YAML',wrongPassword:'密码错误',connectionError:'连接错误',inspect:'详情',start:'启动',stop:'停止',restart:'重启',remove:'删除',containerInspect:'容器详情',confirmRemoveContainer:'确认删除容器？',operationFailed:'操作失败',operationDone:'操作成功'},
-  en:{containers:'Containers',images:'Images',audit:'Audit',hide:'hide',dark:'dark',light:'light',password:'password',login:'login',filterContainers:'filter containers...',filterLogs:'filter logs...',loading:'Loading...',noContainers:'No containers found',selectContainer:'Select a container to view logs',lines:'lines',autoscroll:'autoscroll',loadMore:'load more',download:'download',clear:'clear',loadImage:'load image',deploy:'deploy',refresh:'refresh',repository:'Repository',tag:'Tag',size:'Size',created:'Created',time:'Time',role:'Role',remote:'Remote',action:'Action',target:'Target',result:'Result',output:'Output',success:'Success',failed:'Failed',noAudit:'No audit records',dropTar:'Drop .tar file here or click to browse',uploading:'Uploading...',cancel:'cancel',imageLabel:'Image (optional if compose provided)',composeLabel:'Docker Compose YAML',uploadCompose:'Or upload a compose file',deploying:'Deploying...',imageFiles:'Image Files',close:'close',adminRequired:'Admin access required',noImages:'No images found',delete:'delete',browse:'browse',emptyDir:'Empty directory',imageDeleted:'Image deleted',deleteFailed:'Delete failed',imageLoaded:'Image loaded',loadFailed:'Load failed',uploadFailed:'Upload failed',deployed:'Deployed',deployFailed:'Deploy failed',provideDeploy:'Provide an image or compose YAML',wrongPassword:'wrong password',connectionError:'connection error',inspect:'inspect',start:'start',stop:'stop',restart:'restart',remove:'remove',containerInspect:'Container Inspect',confirmRemoveContainer:'Remove container?',operationFailed:'Operation failed',operationDone:'Operation done'}
+  zh:{containers:'容器',images:'镜像',audit:'审计',hide:'隐藏',dark:'深色',light:'浅色',password:'密码',login:'登录',filterContainers:'过滤容器...',filterLogs:'过滤日志...',loading:'加载中...',noContainers:'未找到容器',selectContainer:'选择容器查看日志',lines:'行',autoscroll:'自动滚动',loadMore:'加载更多',download:'下载',clear:'清空',loadImage:'导入镜像',deploy:'部署',refresh:'刷新',repository:'仓库',tag:'标签',size:'大小',created:'创建时间',time:'时间',role:'角色',remote:'来源',action:'操作',target:'目标',result:'结果',output:'输出',success:'成功',failed:'失败',noAudit:'暂无审计记录',dropTar:'拖拽 .tar 文件到这里，或点击选择',uploading:'上传中...',cancel:'取消',imageLabel:'镜像（如果提供 compose，可选）',composeLabel:'Docker Compose YAML',uploadCompose:'或上传 compose 文件',deploying:'部署中...',imageFiles:'镜像文件',close:'关闭',adminRequired:'需要 admin 权限',noImages:'未找到镜像',delete:'删除',browse:'浏览',emptyDir:'空目录',imageDeleted:'镜像已删除',deleteFailed:'删除失败',imageLoaded:'镜像已导入',loadFailed:'导入失败',uploadFailed:'上传失败',deployed:'部署成功',deployFailed:'部署失败',provideDeploy:'请填写镜像或 compose YAML',wrongPassword:'密码错误',connectionError:'连接错误',inspect:'详情',start:'启动',stop:'停止',restart:'重启',remove:'删除',containerInspect:'容器详情',confirmRemoveContainer:'确认删除容器？',operationFailed:'操作失败',operationDone:'操作成功',compose:'Compose',volumes:'卷',networks:'网络',templates:'模板',inspect:'详情',execTerminal:'终端',pause:'暂停',resume:'继续',pruneUnused:'清理未使用',noCompose:'暂无 Compose 项目',noVolumes:'暂无卷',noNetworks:'暂无网络',confirmPrune:'确认清理所有未使用的卷？',enableNotify:'检测到错误日志，是否开启桌面通知？'}
+  en:{containers:'Containers',images:'Images',audit:'Audit',hide:'hide',dark:'dark',light:'light',password:'password',login:'login',filterContainers:'filter containers...',filterLogs:'filter logs...',loading:'Loading...',noContainers:'No containers found',selectContainer:'Select a container to view logs',lines:'lines',autoscroll:'autoscroll',loadMore:'load more',download:'download',clear:'clear',loadImage:'load image',deploy:'deploy',refresh:'refresh',repository:'Repository',tag:'Tag',size:'Size',created:'Created',time:'Time',role:'Role',remote:'Remote',action:'Action',target:'Target',result:'Result',output:'Output',success:'Success',failed:'Failed',noAudit:'No audit records',dropTar:'Drop .tar file here or click to browse',uploading:'Uploading...',cancel:'cancel',imageLabel:'Image (optional if compose provided)',composeLabel:'Docker Compose YAML',uploadCompose:'Or upload a compose file',deploying:'Deploying...',imageFiles:'Image Files',close:'close',adminRequired:'Admin access required',noImages:'No images found',delete:'delete',browse:'browse',emptyDir:'Empty directory',imageDeleted:'Image deleted',deleteFailed:'Delete failed',imageLoaded:'Image loaded',loadFailed:'Load failed',uploadFailed:'Upload failed',deployed:'Deployed',deployFailed:'Deploy failed',provideDeploy:'Provide an image or compose YAML',wrongPassword:'wrong password',connectionError:'connection error',inspect:'inspect',start:'start',stop:'stop',restart:'restart',remove:'remove',containerInspect:'Container Inspect',confirmRemoveContainer:'Remove container?',operationFailed:'Operation failed',operationDone:'Operation done',compose:'Compose',volumes:'Volumes',networks:'Networks',templates:'Templates',inspect:'inspect',execTerminal:'Terminal',pause:'pause',resume:'resume',pruneUnused:'prune unused',noCompose:'No compose projects',noVolumes:'No volumes',noNetworks:'No networks',confirmPrune:'Prune all unused volumes?',enableNotify:'Error detected, enable desktop notifications?'}}
 };
 
 function t(k){return (I18N[lang]&&I18N[lang][k])||I18N.en[k]||k;}
@@ -402,6 +505,9 @@ function applyLang(){
   document.querySelector('[data-tab="containers"]').textContent=t('containers');
   document.getElementById('tabImages').textContent=t('images');
   document.getElementById('tabAudit').textContent=t('audit');
+  document.getElementById('tabCompose').textContent=t('compose');
+  document.getElementById('tabVolumes').textContent=t('volumes');
+  document.getElementById('tabNetworks').textContent=t('networks');
   document.getElementById('btnSidebar').textContent=sidebarCollapsed?t('containers'):t('hide');
   document.getElementById('sidebarHandle').textContent=t('containers');
   document.querySelector('.sidebar-title').textContent=t('containers');
@@ -529,6 +635,9 @@ function updateImagesTab(){
   var admin=(authRole==='admin'||!authEnabled)&&!mockMode;
   document.getElementById('tabImages').style.display=admin?'':'none';
   document.getElementById('tabAudit').style.display=admin?'':'none';
+  document.getElementById('tabCompose').style.display=admin?'':'none';
+  document.getElementById('tabVolumes').style.display=admin?'':'none';
+  document.getElementById('tabNetworks').style.display=admin?'':'none';
   document.getElementById('statsBar').classList.toggle('show',admin);
   if(admin)loadStats();
 }
@@ -611,7 +720,8 @@ function render(list){
       var buttons='<button class="mini-btn" onclick="showContainerInspect(\''+esc(c.id)+'\',event)">'+t('inspect')+'</button>';
       if(c.state==='running'){
         buttons+='<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'stop\',event)">'+t('stop')+'</button>'+
-          '<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'restart\',event)">'+t('restart')+'</button>';
+          '<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'restart\',event)">'+t('restart')+'</button>'+
+          '<button class="mini-btn" onclick="openExec(\''+esc(c.id)+'\',\''+esc(c.name)+'\',event)">&gt;_</button>';
       }else if(c.state==='exited'){
         buttons+='<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'start\',event)">'+t('start')+'</button>';
       }else{
@@ -647,10 +757,11 @@ function startSSE(){
   };
 }
 
+var activeName='';
 function selectC(id,name){
   if(activeId===id)return;
   if(mockMode){showMockLogs(id,name);return;}
-  activeId=id;
+  activeId=id;activeName=name;
   syncActiveSelection();
   document.getElementById('logHdr').style.display='flex';
   document.getElementById('empty').style.display='none';
@@ -683,6 +794,7 @@ function connectWS(id){
 }
 
 function appendLine(raw,prepend){
+  if(logPaused&&!prepend)return;
   var out=document.getElementById('out');
   lineCount++;
   document.getElementById('lc').textContent=lineCount+' '+t('lines');
@@ -693,10 +805,20 @@ function appendLine(raw,prepend){
   var d=document.createElement('div');
   d.className='line';
   d.setAttribute('data-raw',raw);
-  d.innerHTML='<span class="ts">'+esc(ts)+'</span><span class="msg '+cls+'">'+esc(msg)+'</span>';
+  d.setAttribute('data-level',cls);
+  var displayMsg=msg;
+  var trimmed=msg.trim();
+  if((trimmed.charAt(0)==='{'||trimmed.charAt(0)==='[')&&trimmed.length>2){
+    try{var parsed=JSON.parse(trimmed);displayMsg=JSON.stringify(parsed);}catch(e){}
+  }
+  d.innerHTML='<span class="ts">'+esc(ts)+'</span><span class="msg '+cls+'">'+esc(displayMsg)+'</span><span class="line-actions"><button class="mini-btn copy-btn" onclick="copyLogLine(this)">copy</button></span>';
   if(logFilterQuery){applyFilterToLine(d);}
+  if(levelFilter!=='all'&&cls!==levelFilter){d.style.display='none';}
   if(prepend){out.insertBefore(d,out.firstChild);}else{out.appendChild(d);}
   if(!prepend&&autoScroll)requestAnimationFrame(function(){out.scrollTop=out.scrollHeight;});
+  // notification on error
+  if(cls==='err'&&!prepend){maybeNotify(activeName||'',msg);}
+}
 }
 
 function formatTimestamp(utcTs){
@@ -794,6 +916,23 @@ function downloadLog(){
   URL.revokeObjectURL(a.href);
 }
 function toggleAS(){autoScroll=!autoScroll;document.getElementById('btnAS').classList.toggle('on',autoScroll);if(autoScroll){var out=document.getElementById('out');out.scrollTop=out.scrollHeight;}}
+function togglePause(){logPaused=!logPaused;var b=document.getElementById('btnPause');b.textContent=logPaused?t('resume'):t('pause');b.classList.toggle('on',logPaused);}
+function filterLevel(lvl){
+  levelFilter=lvl;
+  document.querySelectorAll('.level-filter .mini-btn').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-level')===lvl);});
+  document.querySelectorAll('#out .line').forEach(function(line){
+    line.style.display=(lvl==='all'||line.getAttribute('data-level')===lvl)?'':'none';
+  });
+}
+function copyLogLine(btn){
+  var msg=btn.closest('.line').querySelector('.msg').textContent;
+  navigator.clipboard.writeText(msg);
+}
+function maybeNotify(name,msg){
+  if(!notifyEnabled||!window.Notification)return;
+  if(Notification.permission!=='granted')return;
+  try{new Notification('Gaze Docker: '+name,{body:msg.substring(0,200)});}catch(e){}
+}
 
 document.getElementById('out').addEventListener('scroll',function(){
   var atBottom=this.scrollHeight-this.scrollTop-this.clientHeight<40;
@@ -900,22 +1039,17 @@ async function showContainerInspect(id,event){
 function switchTab(tab){
   document.querySelectorAll('.tab').forEach(function(t){t.classList.toggle('active',t.getAttribute('data-tab')===tab);});
   var cp=document.getElementById('containersPanel');
-  var ip=document.getElementById('imagesPanel');
-  var ap=document.getElementById('auditPanel');
-  if(tab==='images'){
-    cp.style.display='none';
-    ip.classList.add('show');
-    ap.classList.remove('show');
-    loadImages();
-  }else if(tab==='audit'){
-    cp.style.display='none';
-    ip.classList.remove('show');
-    ap.classList.add('show');
-    loadAudit();
+  var panels=['imagesPanel','auditPanel','composePanel','volumesPanel','networksPanel'];
+  panels.forEach(function(p){document.getElementById(p).classList.remove('show');});
+  cp.style.display='none';
+  var loaders={images:loadImages,audit:loadAudit,compose:loadCompose,volumes:loadVolumes,networks:loadNetworks};
+  if(tab==='containers'){
+    cp.style.display='';
+  }else if(document.getElementById(tab+'Panel')){
+    document.getElementById(tab+'Panel').classList.add('show');
+    if(loaders[tab])loaders[tab]();
   }else{
     cp.style.display='';
-    ip.classList.remove('show');
-    ap.classList.remove('show');
   }
 }
 
@@ -943,7 +1077,7 @@ function renderImages(images){
       '<td class="img-id">'+esc(img.id.substring(0,12))+'</td>'+
       '<td class="img-size">'+esc(img.size)+'</td>'+
       '<td style="font-size:11px;color:var(--text-muted)">'+esc(img.created)+'</td>'+
-      '<td class="img-actions"><button class="btn" onclick="browseImage(\''+esc(img.id)+'\',\'/\')">'+t('browse')+'</button><button class="btn-danger" onclick="deleteImage(\''+esc(img.id)+'\',\''+esc(img.repository)+':'+esc(img.tag)+'\')">'+t('delete')+'</button></td>'+
+      '<td class="img-actions"><button class="btn" onclick="browseImage(\''+esc(img.id)+'\',\'/\')">'+t('browse')+'</button><button class="btn" onclick="showImageInspect(\''+esc(img.id)+'\')">'+t('inspect')+'</button><button class="btn-danger" onclick="deleteImage(\''+esc(img.id)+'\',\''+esc(img.repository)+':'+esc(img.tag)+'\')">'+t('delete')+'</button></td>'+
       '</tr>';
   }).join('');
 }
@@ -1054,6 +1188,227 @@ function showToast(msg,type){
   d.textContent=msg;
   document.body.appendChild(d);
   setTimeout(function(){d.remove();},4000);
+}
+
+// Compose projects
+async function loadCompose(){
+  try{
+    var url='/api/compose/projects';
+    if(authToken)url+='?token='+encodeURIComponent(authToken);
+    var r=await fetch(url);
+    if(!r.ok)throw new Error('failed');
+    var projects=await r.json()||[];
+    var body=document.getElementById('composeBody');
+    document.getElementById('composeCount').textContent=projects.length+' '+t('compose');
+    if(!projects.length){body.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">'+t('noCompose')+'</td></tr>';return;}
+    body.innerHTML=projects.map(function(p){
+      return '<tr>'+
+        '<td class="img-repo">'+esc(p.name)+'</td>'+
+        '<td>'+esc(p.status)+'</td>'+
+        '<td style="font-size:11px;color:var(--text-muted)">'+(p.services||[]).join(', ')+'</td>'+
+        '<td style="font-size:11px;color:var(--text-muted);max-width:220px;word-break:break-all">'+esc(p.config_dir)+'</td>'+
+        '<td class="img-actions">'+
+          '<button class="mini-btn" onclick="composeAction(\''+esc(p.config_dir)+'\',\'up\')">up</button>'+
+          '<button class="mini-btn" onclick="composeAction(\''+esc(p.config_dir)+'\',\'down\')">down</button>'+
+          '<button class="mini-btn" onclick="composeAction(\''+esc(p.config_dir)+'\',\'restart\')">restart</button>'+
+          '<button class="mini-btn" onclick="viewComposeFile(\''+esc(p.config_dir)+'\')">file</button>'+
+        '</td></tr>';
+    }).join('');
+  }catch(e){console.error(e);}
+}
+
+async function composeAction(dir,action){
+  try{
+    var url='/api/compose/action';
+    if(authToken)url+='?token='+encodeURIComponent(authToken);
+    var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dir:dir,action:action})});
+    var d=await r.json();
+    if(d.ok){showToast(t('operationDone'),'ok');loadCompose();}else{showToast(d.error||t('operationFailed'),'err');}
+  }catch(e){showToast(t('operationFailed'),'err');}
+}
+
+async function viewComposeFile(dir){
+  try{
+    var url='/api/compose/file?dir='+encodeURIComponent(dir);
+    if(authToken)url+='&token='+encodeURIComponent(authToken);
+    var r=await fetch(url);
+    var d=await r.json();
+    document.getElementById('imageInspectPre').textContent=d.content||'(empty)';
+    document.querySelector('#imageInspectModal h2').textContent='docker-compose.yml';
+    document.getElementById('imageInspectModal').classList.add('show');
+  }catch(e){showToast(t('operationFailed'),'err');}
+}
+
+// Volumes
+async function loadVolumes(){
+  try{
+    var url='/api/volumes';
+    if(authToken)url+='?token='+encodeURIComponent(authToken);
+    var r=await fetch(url);
+    if(!r.ok)throw new Error('failed');
+    var volumes=await r.json()||[];
+    var body=document.getElementById('volumesBody');
+    document.getElementById('volumeCount').textContent=volumes.length+' '+t('volumes');
+    if(!volumes.length){body.innerHTML='<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:20px">'+t('noVolumes')+'</td></tr>';return;}
+    body.innerHTML=volumes.map(function(v){
+      return '<tr>'+
+        '<td class="img-repo">'+esc(v.name)+'</td>'+
+        '<td>'+esc(v.driver)+'</td>'+
+        '<td style="font-size:11px;color:var(--text-muted);max-width:320px;word-break:break-all">'+esc(v.mountpoint)+'</td>'+
+        '<td><button class="btn-danger" onclick="deleteVolume(\''+esc(v.name)+'\')">'+t('delete')+'</button></td>'+
+        '</tr>';
+    }).join('');
+  }catch(e){console.error(e);}
+}
+
+async function deleteVolume(name){
+  if(!confirm(t('delete')+' '+name+'?'))return;
+  var url='/api/volumes/delete?id='+encodeURIComponent(name);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'DELETE'});
+  var d=await r.json();
+  if(d.ok){showToast(t('operationDone'),'ok');loadVolumes();}else{showToast(d.error||t('operationFailed'),'err');}
+}
+
+async function pruneVolumes(){
+  if(!confirm(t('confirmPrune')))return;
+  var url='/api/volumes/prune';
+  if(authToken)url+='?token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'POST'});
+  var d=await r.json();
+  if(d.ok){showToast(t('operationDone'),'ok');loadVolumes();}else{showToast(d.error||t('operationFailed'),'err');}
+}
+
+// Networks
+async function loadNetworks(){
+  try{
+    var url='/api/networks';
+    if(authToken)url+='?token='+encodeURIComponent(authToken);
+    var r=await fetch(url);
+    if(!r.ok)throw new Error('failed');
+    var nets=await r.json()||[];
+    var body=document.getElementById('networksBody');
+    document.getElementById('networkCount').textContent=nets.length+' '+t('networks');
+    if(!nets.length){body.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:20px">'+t('noNetworks')+'</td></tr>';return;}
+    body.innerHTML=nets.map(function(n){
+      return '<tr>'+
+        '<td class="img-id">'+esc(n.id.substring(0,12))+'</td>'+
+        '<td class="img-repo">'+esc(n.name)+'</td>'+
+        '<td>'+esc(n.driver)+'</td>'+
+        '<td>'+esc(n.scope)+'</td>'+
+        '<td class="img-actions">'+
+          '<button class="mini-btn" onclick="showNetworkInspect(\''+esc(n.id)+'\')">'+t('inspect')+'</button>'+
+          '<button class="btn-danger" onclick="deleteNetwork(\''+esc(n.id)+'\')">'+t('delete')+'</button>'+
+        '</td></tr>';
+    }).join('');
+  }catch(e){console.error(e);}
+}
+
+async function showNetworkInspect(id){
+  document.getElementById('networkInspectModal').classList.add('show');
+  document.getElementById('networkInspectPre').textContent=t('loading');
+  var url='/api/networks/inspect?id='+encodeURIComponent(id);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  var r=await fetch(url);
+  var d=await r.json();
+  document.getElementById('networkInspectPre').textContent=r.ok?JSON.stringify(d,null,2):(d.error||t('operationFailed'));
+}
+
+async function deleteNetwork(id){
+  if(!confirm(t('delete')+' '+id+'?'))return;
+  var url='/api/networks/delete?id='+encodeURIComponent(id);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'DELETE'});
+  var d=await r.json();
+  if(d.ok){showToast(t('operationDone'),'ok');loadNetworks();}else{showToast(d.error||t('operationFailed'),'err');}
+}
+
+// Image inspect
+async function showImageInspect(id){
+  document.getElementById('imageInspectModal').classList.add('show');
+  document.querySelector('#imageInspectModal h2').textContent=t('inspect');
+  document.getElementById('imageInspectPre').textContent=t('loading');
+  var url='/api/images/inspect?id='+encodeURIComponent(id);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  var r=await fetch(url);
+  var d=await r.json();
+  document.getElementById('imageInspectPre').textContent=r.ok?JSON.stringify(d,null,2):(d.error||t('operationFailed'));
+}
+
+// Exec terminal
+var execWs=null;
+function openExec(id,name,event){
+  if(event)event.stopPropagation();
+  document.getElementById('execModal').classList.add('show');
+  document.getElementById('execTitle').textContent=t('execTerminal')+': '+name;
+  document.getElementById('terminalOut').textContent='';
+  if(execWs){execWs.close();execWs=null;}
+  var proto=location.protocol==='https:'?'wss':'ws';
+  var url=proto+'://'+location.host+'/api/exec?id='+encodeURIComponent(id);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  execWs=new WebSocket(url);
+  execWs.onmessage=function(e){
+    var out=document.getElementById('terminalOut');
+    out.textContent+=e.data;
+    out.scrollTop=out.scrollHeight;
+  };
+  execWs.onclose=function(){};
+}
+function sendExecCmd(cmd){
+  if(execWs&&execWs.readyState===1){execWs.send(cmd);}
+}
+function closeExecModal(){if(execWs){execWs.close();execWs=null;}closeModal('execModal');}
+
+// Templates
+function showTemplateModal(){
+  document.getElementById('templateModal').classList.add('show');
+  loadTemplates();
+}
+async function loadTemplates(){
+  var url='/api/templates';
+  if(authToken)url+='?token='+encodeURIComponent(authToken);
+  var r=await fetch(url);
+  var list=await r.json()||[];
+  var el=document.getElementById('templateList');
+  if(!list.length){el.innerHTML='<div style="color:var(--text-muted);font-size:11px;padding:8px">No templates</div>';return;}
+  el.innerHTML=list.map(function(tp){
+    return '<div class="template-card">'+
+      '<div class="template-card-name">'+esc(tp.name)+'</div>'+
+      '<pre class="inspect-pre" style="max-height:120px;margin:6px 0">'+esc(tp.body)+'</pre>'+
+      '<div class="img-actions"><button class="mini-btn" onclick="loadTemplateIntoDeploy(\''+esc(tp.body).replace(/'/g,"\\'")+'\')">use</button><button class="btn-danger" onclick="deleteTemplate(\''+esc(tp.name)+'\')">delete</button></div>'+
+      '</div>';
+  }).join('');
+}
+async function saveTemplate(){
+  var name=document.getElementById('tplName').value.trim();
+  var body=document.getElementById('deployCompose').value;
+  if(!name||!body){showToast('name and compose required','err');return;}
+  var url='/api/templates';
+  if(authToken)url+='?token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name,body:body})});
+  var d=await r.json();
+  if(d.ok){showToast(t('operationDone'),'ok');document.getElementById('tplName').value='';loadTemplates();}else{showToast(t('operationFailed'),'err');}
+}
+async function deleteTemplate(name){
+  var url='/api/templates/delete?id='+encodeURIComponent(name);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  var r=await fetch(url,{method:'DELETE'});
+  var d=await r.json();
+  if(d.ok){loadTemplates();}else{showToast(t('operationFailed'),'err');}
+}
+function loadTemplateIntoDeploy(body){
+  document.getElementById('deployCompose').value=body.replace(/\\'/g,"'");
+  closeModal('templateModal');
+}
+
+// Notification permission - request on first error
+var notifyAsked=false;
+function checkNotifyPermission(){
+  if(notifyAsked||notifyEnabled||!window.Notification)return;
+  if(Notification.permission==='default'){
+    notifyAsked=true;
+    Notification.requestPermission().then(function(p){notifyEnabled=(p==='granted');});
+  }
 }
 
 // Audit

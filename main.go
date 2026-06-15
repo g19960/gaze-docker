@@ -528,6 +528,277 @@ func handleLogsHistory(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(lines)
 }
 
+// --- Compose projects ---
+
+type ComposeProject struct {
+	Name      string   `json:"name"`
+	Status    string   `json:"status"`
+	ConfigDir string   `json:"config_dir"`
+	Services  []string `json:"services"`
+}
+
+func listComposeProjects() ([]ComposeProject, error) {
+	out, err := exec.Command("docker", "compose", "ls", "--all", "--format", "json").Output()
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ls failed: %w", err)
+	}
+	var raw []struct {
+		Name      string `json:"Name"`
+		Status    string `json:"Status"`
+		ConfigDir string `json:"ConfigFiles"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, err
+	}
+	var projects []ComposeProject
+	for _, r := range raw {
+		services := []string{}
+		if r.ConfigDir != "" {
+			if psOut, err := exec.Command("docker", "compose", "-f", r.ConfigDir, "ps", "--format", "{{.Service}}").Output(); err == nil {
+				for _, s := range strings.Fields(string(psOut)) {
+					services = append(services, s)
+				}
+			}
+		}
+		projects = append(projects, ComposeProject{
+			Name: r.Name, Status: r.Status, ConfigDir: r.ConfigDir, Services: services,
+		})
+	}
+	return projects, nil
+}
+
+func handleComposeProjects(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	projects, err := listComposeProjects()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(projects)
+}
+
+func handleComposeAction(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Dir    string `json:"dir"`
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.Dir == "" || req.Action == "" {
+		http.Error(w, "missing dir or action", http.StatusBadRequest)
+		return
+	}
+	var args []string
+	switch req.Action {
+	case "up":
+		args = []string{"-f", req.Dir, "up", "-d"}
+	case "down":
+		args = []string{"-f", req.Dir, "down"}
+	case "restart":
+		args = []string{"-f", req.Dir, "restart"}
+	default:
+		http.Error(w, "invalid action", http.StatusBadRequest)
+		return
+	}
+	out, err := exec.Command("docker", append([]string{"compose"}, args...)...).CombinedOutput()
+	action := "compose." + req.Action
+	if err != nil {
+		recordAudit(r, action, req.Dir, false, string(out))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	recordAudit(r, action, req.Dir, true, string(out))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(string(out))})
+}
+
+func handleComposeFile(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	dir := r.URL.Query().Get("dir")
+	if dir == "" {
+		http.Error(w, "missing dir", http.StatusBadRequest)
+		return
+	}
+	data, err := os.ReadFile(dir)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"content": string(data)})
+}
+
+// --- Volumes ---
+
+type Volume struct {
+	Name       string `json:"name"`
+	Driver     string `json:"driver"`
+	Mountpoint string `json:"mountpoint"`
+}
+
+func handleVolumes(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	out, err := exec.Command("docker", "volume", "ls", "--format", "{{.Name}}\t{{.Driver}}\t{{.Mountpoint}}").Output()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var volumes []Volume
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		parts := strings.Split(scanner.Text(), "\t")
+		if len(parts) < 3 {
+			continue
+		}
+		volumes = append(volumes, Volume{Name: parts[0], Driver: parts[1], Mountpoint: parts[2]})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(volumes)
+}
+
+func handleVolumeDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	name := r.URL.Query().Get("id")
+	if name == "" {
+		http.Error(w, "missing volume name", http.StatusBadRequest)
+		return
+	}
+	out, err := exec.Command("docker", "volume", "rm", name).CombinedOutput()
+	if err != nil {
+		recordAudit(r, "volume.delete", name, false, string(out))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	recordAudit(r, "volume.delete", name, true, string(out))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(string(out))})
+}
+
+func handleVolumePrune(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	out, err := exec.Command("docker", "volume", "prune", "-f").CombinedOutput()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	recordAudit(r, "volume.prune", "all", true, string(out))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(string(out))})
+}
+
+// --- Networks ---
+
+type Network struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Driver  string `json:"driver"`
+	Scope   string `json:"scope"`
+}
+
+func handleNetworks(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	out, err := exec.Command("docker", "network", "ls", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}\t{{.Scope}}").Output()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var networks []Network
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		parts := strings.Split(scanner.Text(), "\t")
+		if len(parts) < 4 {
+			continue
+		}
+		networks = append(networks, Network{ID: parts[0], Name: parts[1], Driver: parts[2], Scope: parts[3]})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(networks)
+}
+
+func handleNetworkInspect(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing network id", http.StatusBadRequest)
+		return
+	}
+	out, err := exec.Command("docker", "network", "inspect", id).CombinedOutput()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	var data any
+	if err := json.Unmarshal(out, &data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func handleNetworkDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing network id", http.StatusBadRequest)
+		return
+	}
+	out, err := exec.Command("docker", "network", "rm", id).CombinedOutput()
+	if err != nil {
+		recordAudit(r, "network.delete", id, false, string(out))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	recordAudit(r, "network.delete", id, true, string(out))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(string(out))})
+}
+
 func handleRefresh(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -573,6 +844,20 @@ var (
 	auditEntries []AuditEntry
 )
 
+func gazeConfigDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		home = os.TempDir()
+	}
+	return filepath.Join(home, ".gaze-docker")
+}
+
+func gazeSubDir(name string) string {
+	dir := filepath.Join(gazeConfigDir(), name)
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
 func recordAudit(r *http.Request, action, target string, success bool, output string) {
 	output = strings.TrimSpace(output)
 	if len(output) > 4000 {
@@ -593,6 +878,138 @@ func recordAudit(r *http.Request, action, target string, success bool, output st
 	if len(auditEntries) > 200 {
 		auditEntries = auditEntries[:200]
 	}
+	// persist to disk (best-effort)
+	if data, err := json.Marshal(entry); err == nil {
+		f, err := os.OpenFile(filepath.Join(gazeConfigDir(), "audit.jsonl"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err == nil {
+			f.Write(append(data, '\n'))
+			f.Close()
+		}
+	}
+}
+
+func handleTemplates(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	dir := gazeSubDir("compose-templates")
+	if r.Method == http.MethodPost {
+		var req struct {
+			Name string `json:"name"`
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if req.Name == "" {
+			http.Error(w, "missing name", http.StatusBadRequest)
+			return
+		}
+		if err := os.WriteFile(filepath.Join(dir, req.Name+".yml"), []byte(req.Body), 0644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		return
+	}
+	entries, _ := os.ReadDir(dir)
+	type tmpl struct {
+		Name string `json:"name"`
+		Body string `json:"body"`
+	}
+	var templates []tmpl
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		body, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		templates = append(templates, tmpl{Name: strings.TrimSuffix(e.Name(), ".yml"), Body: string(body)})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(templates)
+}
+
+func handleTemplateDelete(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	name := r.URL.Query().Get("id")
+	if name == "" {
+		http.Error(w, "missing name", http.StatusBadRequest)
+		return
+	}
+	dir := gazeSubDir("compose-templates")
+	if err := os.Remove(filepath.Join(dir, name+".yml")); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func handleDeployHistory(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	dir := gazeSubDir("deploy-history")
+	entries, _ := os.ReadDir(dir)
+	type hist struct {
+		Name string `json:"name"`
+		Body string `json:"body"`
+	}
+	var history []hist
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if e.IsDir() {
+			continue
+		}
+		body, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+		history = append(history, hist{Name: e.Name(), Body: string(body)})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(history)
+}
+
+var alertWebhook = os.Getenv("ALERT_WEBHOOK")
+
+func handleAlert(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Container string `json:"container"`
+		Message   string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	log.Printf("[ALERT] container=%s message=%s", req.Container, req.Message)
+	if alertWebhook != "" {
+		payload, _ := json.Marshal(map[string]string{
+			"container": req.Container,
+			"message":   req.Message,
+			"time":      time.Now().Format(time.RFC3339),
+		})
+		go func() {
+			resp, err := http.Post(alertWebhook, "application/json", strings.NewReader(string(payload)))
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 func handleAudit(w http.ResponseWriter, r *http.Request) {
@@ -766,6 +1183,8 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		recordAudit(r, "deploy.compose", "docker-compose.yml", true, string(out))
+		histDir := gazeSubDir("deploy-history")
+		os.WriteFile(filepath.Join(histDir, fmt.Sprintf("compose-%d.yml", time.Now().UnixNano())), []byte(req.Compose), 0644)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "output": strings.TrimSpace(string(out))})
 		return
@@ -917,6 +1336,155 @@ func parsePercent(v string) float64 {
 	v = strings.TrimSpace(strings.TrimSuffix(v, "%"))
 	f, _ := strconv.ParseFloat(v, 64)
 	return f
+}
+
+type ContainerStat struct {
+	ID     string  `json:"id"`
+	Name   string  `json:"name"`
+	CPU    float64 `json:"cpu"`
+	MemUse string  `json:"mem_use"`
+	MemPct float64 `json:"mem_pct"`
+	NetIO  string  `json:"net_io"`
+	Block  string  `json:"block_io"`
+	PIDs   string  `json:"pids"`
+}
+
+func handleContainerStats(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}").Output()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var stats []ContainerStat
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		parts := strings.Split(scanner.Text(), "\t")
+		if len(parts) < 8 {
+			continue
+		}
+		memUse := ""
+		memParts := strings.Split(parts[3], " / ")
+		if len(memParts) > 0 {
+			memUse = memParts[0]
+		}
+		stats = append(stats, ContainerStat{
+			ID: parts[0], Name: parts[1], CPU: parsePercent(parts[2]),
+			MemUse: memUse, MemPct: parsePercent(parts[4]),
+			NetIO: parts[5], Block: parts[6], PIDs: parts[7],
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(stats)
+}
+
+func handleImageInspect(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "missing image id", http.StatusBadRequest)
+		return
+	}
+	out, err := exec.Command("docker", "image", "inspect", id).CombinedOutput()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	var data any
+	if err := json.Unmarshal(out, &data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(data)
+}
+
+func handleExec(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	containerID := r.URL.Query().Get("id")
+	if containerID == "" {
+		http.Error(w, "missing container id", http.StatusBadRequest)
+		return
+	}
+	allowed, err := hasAccessToContainer(roleFromRequest(r), containerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("exec websocket upgrade error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "docker", "exec", "-i", containerID, "sh")
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "docker", "exec", "-i", containerID, "cmd")
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return
+	}
+	cmd.Stderr = cmd.Stdout
+	if err := cmd.Start(); err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("[ERROR] "+err.Error()))
+		return
+	}
+
+	// stdout -> websocket
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := stdout.Read(buf)
+			if n > 0 {
+				if werr := conn.WriteMessage(websocket.TextMessage, buf[:n]); werr != nil {
+					cancel()
+					return
+				}
+			}
+			if rerr != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	// websocket -> stdin
+	for {
+		_, data, rerr := conn.ReadMessage()
+		if rerr != nil {
+			cancel()
+			break
+		}
+		if _, werr := stdin.Write(append(data, '\n')); werr != nil {
+			cancel()
+			break
+		}
+	}
+	_ = cmd.Wait()
 }
 
 func handleStats(w http.ResponseWriter, r *http.Request) {
@@ -1092,6 +1660,22 @@ func main() {
 	mux.HandleFunc("/api/deploy", handleDeploy)
 	mux.HandleFunc("/api/stats", handleStats)
 	mux.HandleFunc("/api/audit", handleAudit)
+	mux.HandleFunc("/api/compose/projects", handleComposeProjects)
+	mux.HandleFunc("/api/compose/action", handleComposeAction)
+	mux.HandleFunc("/api/compose/file", handleComposeFile)
+	mux.HandleFunc("/api/volumes", handleVolumes)
+	mux.HandleFunc("/api/volumes/delete", handleVolumeDelete)
+	mux.HandleFunc("/api/volumes/prune", handleVolumePrune)
+	mux.HandleFunc("/api/networks", handleNetworks)
+	mux.HandleFunc("/api/networks/inspect", handleNetworkInspect)
+	mux.HandleFunc("/api/networks/delete", handleNetworkDelete)
+	mux.HandleFunc("/api/containers/stats", handleContainerStats)
+	mux.HandleFunc("/api/images/inspect", handleImageInspect)
+	mux.HandleFunc("/api/exec", handleExec)
+	mux.HandleFunc("/api/templates", handleTemplates)
+	mux.HandleFunc("/api/templates/delete", handleTemplateDelete)
+	mux.HandleFunc("/api/deploy/history", handleDeployHistory)
+	mux.HandleFunc("/api/alert", handleAlert)
 
 	addr := ":" + listenPort
 	log.Printf("[BUILD] version=%s commit=%s built_at=%s go=%s platform=%s/%s", buildVersion, buildCommit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH)

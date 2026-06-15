@@ -192,9 +192,42 @@ func roleFromRequest(r *http.Request) string {
 	v := r.Context().Value(roleContextKey)
 	role, ok := v.(string)
 	if !ok || role == "" {
-		return roleAdmin
+		return roleViewer // fail-closed: missing role gets least privilege
 	}
 	return role
+}
+
+// validID checks that an ID/name is safe to pass to docker as a non-option argument.
+// Disallows leading "-" (option injection). Allows alphanumerics and common tag/name chars.
+func validID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	if s[0] == '-' {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z') && !(c >= 'A' && c <= 'Z') && !(c >= '0' && c <= '9') &&
+			c != '_' && c != '.' && c != ':' && c != '/' && c != '@' && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+// validImageRef validates a docker image reference (repo[:tag]). No spaces or shell metachars.
+func validImageRef(s string) bool {
+	if s == "" || len(s) > 256 || s[0] == '-' {
+		return false
+	}
+	for _, c := range s {
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ';' ||
+			c == '|' || c == '&' || c == '$' || c == '`' || c == '(' || c == ')' ||
+			c == '<' || c == '>' || c == '*' || c == '?' || c == '\\' || c == '"' || c == '\'' {
+			return false
+		}
+	}
+	return true
 }
 
 func tokenFromRequest(r *http.Request) string {
@@ -356,6 +389,10 @@ func handleContainerAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id or action", http.StatusBadRequest)
 		return
 	}
+	if !validID(req.ID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
+		return
+	}
 	args := []string{}
 	switch req.Action {
 	case "start", "stop", "restart":
@@ -386,11 +423,11 @@ func handleContainerInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	containerID := r.URL.Query().Get("id")
-	if containerID == "" {
-		http.Error(w, "missing container id", http.StatusBadRequest)
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
 		return
 	}
-	out, err := exec.Command("docker", "inspect", containerID).CombinedOutput()
+	out, err := exec.Command("docker", "inspect", "--", containerID).CombinedOutput()
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -408,8 +445,8 @@ func handleContainerInspect(w http.ResponseWriter, r *http.Request) {
 
 func handleLogs(w http.ResponseWriter, r *http.Request) {
 	containerID := r.URL.Query().Get("id")
-	if containerID == "" {
-		http.Error(w, "missing container id", http.StatusBadRequest)
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
 		return
 	}
 
@@ -496,8 +533,8 @@ func handleLogs(w http.ResponseWriter, r *http.Request) {
 
 func handleLogsHistory(w http.ResponseWriter, r *http.Request) {
 	containerID := r.URL.Query().Get("id")
-	if containerID == "" {
-		http.Error(w, "missing container id", http.StatusBadRequest)
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
 		return
 	}
 
@@ -557,18 +594,28 @@ func listComposeProjects() ([]ComposeProject, error) {
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, err
 	}
+	// single docker ps call to collect services per project (avoids N+1)
+	servicesByProject := map[string][]string{}
+	if psOut, perr := exec.Command("docker", "ps", "-a", "--format", "{{.Label \"com.docker.compose.project\"}}\t{{.Label \"com.docker.compose.service\"}}").Output(); perr == nil {
+		seen := map[string]bool{}
+		for _, line := range strings.Split(string(psOut), "\n") {
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 || parts[0] == "" {
+				continue
+			}
+			key := parts[0] + "/" + parts[1]
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			servicesByProject[parts[0]] = append(servicesByProject[parts[0]], parts[1])
+		}
+	}
 	var projects []ComposeProject
 	for _, r := range raw {
-		services := []string{}
-		if r.ConfigDir != "" {
-			if psOut, err := exec.Command("docker", "compose", "-f", r.ConfigDir, "ps", "--format", "{{.Service}}").Output(); err == nil {
-				for _, s := range strings.Fields(string(psOut)) {
-					services = append(services, s)
-				}
-			}
-		}
 		projects = append(projects, ComposeProject{
-			Name: r.Name, Status: r.Status, ConfigDir: r.ConfigDir, Services: services,
+			Name: r.Name, Status: r.Status, ConfigDir: r.ConfigDir,
+			Services: servicesByProject[r.Name],
 		})
 	}
 	return projects, nil
@@ -645,6 +692,17 @@ func handleComposeFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing dir", http.StatusBadRequest)
 		return
 	}
+	// restrict to compose files: must end with .yml/.yaml and be a real file (no traversal beyond a basename check)
+	lower := strings.ToLower(dir)
+	if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
+		http.Error(w, "only .yml/.yaml compose files allowed", http.StatusBadRequest)
+		return
+	}
+	info, err := os.Stat(dir)
+	if err != nil || info.IsDir() {
+		http.Error(w, "compose file not found", http.StatusBadRequest)
+		return
+	}
 	data, err := os.ReadFile(dir)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -691,8 +749,8 @@ func handleVolumeDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.URL.Query().Get("id")
-	if name == "" {
-		http.Error(w, "missing volume name", http.StatusBadRequest)
+	if !validID(name) {
+		http.Error(w, "invalid volume name", http.StatusBadRequest)
 		return
 	}
 	out, err := exec.Command("docker", "volume", "rm", name).CombinedOutput()
@@ -763,11 +821,11 @@ func handleNetworkInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
-	if id == "" {
-		http.Error(w, "missing network id", http.StatusBadRequest)
+	if !validID(id) {
+		http.Error(w, "invalid network id", http.StatusBadRequest)
 		return
 	}
-	out, err := exec.Command("docker", "network", "inspect", id).CombinedOutput()
+	out, err := exec.Command("docker", "network", "inspect", "--", id).CombinedOutput()
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -789,8 +847,8 @@ func handleNetworkDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
-	if id == "" {
-		http.Error(w, "missing network id", http.StatusBadRequest)
+	if !validID(id) {
+		http.Error(w, "invalid network id", http.StatusBadRequest)
 		return
 	}
 	out, err := exec.Command("docker", "network", "rm", id).CombinedOutput()
@@ -984,6 +1042,40 @@ func handleDeployHistory(w http.ResponseWriter, r *http.Request) {
 
 var alertWebhook = os.Getenv("ALERT_WEBHOOK")
 
+var (
+	alertClient = &http.Client{Timeout: 5 * time.Second}
+	alertSem    = make(chan struct{}, 8) // cap concurrent webhook deliveries
+)
+
+func forwardAlert(container, message string) {
+	if alertWebhook == "" {
+		return
+	}
+	if len(container) > 256 {
+		container = container[:256]
+	}
+	if len(message) > 4096 {
+		message = message[:4096]
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"container": container,
+		"message":   message,
+		"time":      time.Now().Format(time.RFC3339),
+	})
+	select {
+	case alertSem <- struct{}{}:
+		go func() {
+			defer func() { <-alertSem }()
+			resp, err := alertClient.Post(alertWebhook, "application/json", strings.NewReader(string(payload)))
+			if err == nil {
+				resp.Body.Close()
+			}
+		}()
+	default:
+		// at capacity, drop to avoid goroutine pile-up
+	}
+}
+
 func handleAlert(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1001,20 +1093,7 @@ func handleAlert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	log.Printf("[ALERT] container=%s message=%s", req.Container, req.Message)
-	if alertWebhook != "" {
-		payload, _ := json.Marshal(map[string]string{
-			"container": req.Container,
-			"message":   req.Message,
-			"time":      time.Now().Format(time.RFC3339),
-		})
-		go func() {
-			resp, err := http.Post(alertWebhook, "application/json", strings.NewReader(string(payload)))
-			if err == nil {
-				resp.Body.Close()
-			}
-		}()
-	}
+	forwardAlert(req.Container, req.Message)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
@@ -1155,17 +1234,20 @@ func handleContainersHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	health := map[string]string{}
+	// derive health from the ps Status field ("Up X minutes (healthy)") — single docker call, no N+1
 	for _, c := range containers {
 		if c.State != "running" {
 			continue
 		}
-		out, err := exec.Command("docker", "inspect", "--format", "{{.State.Health.Status}}", c.ID).Output()
-		if err != nil {
-			continue
-		}
-		h := strings.TrimSpace(string(out))
-		if h == "<no value>" || h == "" {
-			h = "none"
+		h := "none"
+		s := strings.ToLower(c.Status)
+		switch {
+		case strings.Contains(s, "(unhealthy)"):
+			h = "unhealthy"
+		case strings.Contains(s, "(healthy)"):
+			h = "healthy"
+		case strings.Contains(s, "(starting)"):
+			h = "starting"
 		}
 		health[c.ID] = h
 	}
@@ -1244,11 +1326,11 @@ func handleImageDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	imageID := r.URL.Query().Get("id")
-	if imageID == "" {
-		http.Error(w, "missing image id", http.StatusBadRequest)
+	if !validID(imageID) {
+		http.Error(w, "invalid image id", http.StatusBadRequest)
 		return
 	}
-	out, err := exec.Command("docker", "rmi", imageID).CombinedOutput()
+	out, err := exec.Command("docker", "rmi", "--", imageID).CombinedOutput()
 	if err != nil {
 		recordAudit(r, "image.delete", imageID, false, string(out))
 		w.Header().Set("Content-Type", "application/json")
@@ -1280,7 +1362,12 @@ func handleImageLoad(w http.ResponseWriter, r *http.Request) {
 
 	tmpDir := filepath.Join(os.TempDir(), "gaze-load")
 	os.MkdirAll(tmpDir, 0755)
-	tmpPath := filepath.Join(tmpDir, header.Filename)
+	// strip any path components from the client-supplied filename to prevent traversal
+	safeName := filepath.Base(header.Filename)
+	if safeName == "." || safeName == "/" || safeName == "\\" {
+		safeName = "image-" + randomHex(8) + ".tar"
+	}
+	tmpPath := filepath.Join(tmpDir, safeName)
 	dst, err := os.Create(tmpPath)
 	if err != nil {
 		http.Error(w, "failed to create temp file", http.StatusInternalServerError)
@@ -1355,6 +1442,10 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing image or compose", http.StatusBadRequest)
 		return
 	}
+	if !validImageRef(req.Image) {
+		http.Error(w, "invalid image reference", http.StatusBadRequest)
+		return
+	}
 	out, err := exec.Command("docker", "run", "-d", req.Image).CombinedOutput()
 	if err != nil {
 		recordAudit(r, "deploy.image", req.Image, false, string(out))
@@ -1421,12 +1512,12 @@ func handleImageFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	imageID := r.URL.Query().Get("id")
-	if imageID == "" {
-		http.Error(w, "missing image id", http.StatusBadRequest)
+	if !validID(imageID) {
+		http.Error(w, "invalid image id", http.StatusBadRequest)
 		return
 	}
 	basePath := r.URL.Query().Get("path")
-	containerName := "gaze-browse-" + randomHex(6)
+	containerName := "gaze-browse-" + randomHex(16)
 	if out, err := exec.Command("docker", "create", "--name", containerName, imageID).CombinedOutput(); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1435,7 +1526,9 @@ func handleImageFiles(w http.ResponseWriter, r *http.Request) {
 	}
 	defer exec.Command("docker", "rm", containerName).Run()
 
-	cmd := exec.Command("docker", "export", containerName)
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "export", containerName)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1449,6 +1542,13 @@ func handleImageFiles(w http.ResponseWriter, r *http.Request) {
 	entries := map[string]FileEntry{}
 	tr := tar.NewReader(stdout)
 	for {
+		select {
+		case <-ctx.Done():
+			cancel()
+			_ = cmd.Wait()
+			return
+		default:
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -1575,15 +1675,32 @@ func handleImagesCleanup(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		var results []string
+		// validate all IDs first
+		var valid []string
 		for _, id := range req.IDs {
-			out, err := exec.Command("docker", "rmi", id).CombinedOutput()
+			if validID(id) {
+				valid = append(valid, id)
+			}
+		}
+		if len(valid) == 0 {
+			http.Error(w, "no valid ids", http.StatusBadRequest)
+			return
+		}
+		// batch in chunks to avoid arg-length limits
+		var results []string
+		for i := 0; i < len(valid); i += 50 {
+			end := i + 50
+			if end > len(valid) {
+				end = len(valid)
+			}
+			args := append([]string{"rmi"}, valid[i:end]...)
+			out, err := exec.Command("docker", args...).CombinedOutput()
 			if err != nil {
-				results = append(results, id+": "+strings.TrimSpace(string(out)))
-				recordAudit(r, "image.delete", id, false, string(out))
+				results = append(results, "batch error: "+strings.TrimSpace(string(out)))
+				recordAudit(r, "image.delete", strings.Join(valid[i:end], ","), false, string(out))
 			} else {
-				results = append(results, id+": ok")
-				recordAudit(r, "image.delete", id, true, string(out))
+				results = append(results, strings.Join(valid[i:end], ",")+": ok")
+				recordAudit(r, "image.delete", strings.Join(valid[i:end], ","), true, string(out))
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1599,19 +1716,16 @@ func handleImagesCleanup(w http.ResponseWriter, r *http.Request) {
 		used[img] = true
 	}
 	dangling := parseImageLines(string(danglingOut))
+	danglingSet := map[string]bool{}
+	for _, d := range dangling {
+		danglingSet[d.ID] = true
+	}
 	var unused []CleanupImage
 	for _, img := range parseImageLines(string(allOut)) {
 		if used[img.Repo+":"+img.Tag] || used[img.Repo] || used[img.ID] {
 			continue
 		}
-		isDangling := false
-		for _, d := range dangling {
-			if d.ID == img.ID {
-				isDangling = true
-				break
-			}
-		}
-		if !isDangling {
+		if !danglingSet[img.ID] {
 			unused = append(unused, img)
 		}
 	}
@@ -1628,11 +1742,11 @@ func handleImageInspect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.URL.Query().Get("id")
-	if id == "" {
-		http.Error(w, "missing image id", http.StatusBadRequest)
+	if !validID(id) {
+		http.Error(w, "invalid image id", http.StatusBadRequest)
 		return
 	}
-	out, err := exec.Command("docker", "image", "inspect", id).CombinedOutput()
+	out, err := exec.Command("docker", "image", "inspect", "--", id).CombinedOutput()
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -1654,8 +1768,8 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	containerID := r.URL.Query().Get("id")
-	if containerID == "" {
-		http.Error(w, "missing container id", http.StatusBadRequest)
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
 		return
 	}
 	allowed, err := hasAccessToContainer(roleFromRequest(r), containerID)
@@ -1713,16 +1827,35 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// websocket -> stdin
+	// websocket -> stdin: write in a goroutine so a blocked write can be cancelled
+	stdinWriteErr := make(chan error, 1)
 	for {
 		_, data, rerr := conn.ReadMessage()
 		if rerr != nil {
 			cancel()
 			break
 		}
-		if _, werr := stdin.Write(append(data, '\n')); werr != nil {
+		select {
+		case stdinWriteErr <- nil:
+		default:
+			// previous write still pending; skip to avoid backpressure pile-up
+		}
+		go func(d []byte) {
+			if _, werr := stdin.Write(append(d, '\n')); werr != nil {
+				select {
+				case stdinWriteErr <- werr:
+				default:
+				}
+				cancel()
+			}
+		}(data)
+		select {
+		case err := <-stdinWriteErr:
+			if err != nil {
+				cancel()
+			}
+		case <-ctx.Done():
 			cancel()
-			break
 		}
 	}
 	_ = cmd.Wait()

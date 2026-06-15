@@ -701,8 +701,13 @@ function updateImagesTab(){
 
 function showLogin(){
   authToken='';authRole='';sessionStorage.removeItem('token');sessionStorage.removeItem('role');
+  wsWantClose=true;
   if(ws){ws.close();ws=null;}
+  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
   if(sseSource){sseSource.close();sseSource=null;}
+  if(sseRebuildTimer){clearTimeout(sseRebuildTimer);sseRebuildTimer=null;}
+  if(eventSource){eventSource.close();eventSource=null;}
+  if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
   updateRolePill();updateImagesTab();
   document.getElementById('loginOverlay').style.display='flex';
   document.getElementById('loginPwd').focus();
@@ -724,8 +729,12 @@ async function checkAuth(){
 }
 
 function startMockMode(){
+  wsWantClose=true;
   if(ws){ws.close();ws=null;}
+  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
   if(sseSource){sseSource.close();sseSource=null;}
+  if(eventSource){eventSource.close();eventSource=null;}
+  if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
   authRole='viewer';
   updateRolePill();
   document.getElementById('loginOverlay').style.display='none';
@@ -794,13 +803,12 @@ function render(list){
       '<div class="item-meta"><span class="badge '+c.state+'">'+c.state+'</span>'+healthDot(c.id)+
       '<span class="img-text">'+esc(c.image)+'</span></div>'+
       (c.ports?'<div class="item-meta" style="margin-top:3px;font-size:9px;color:var(--cyan)">'+esc(c.ports.substring(0,60))+'</div>':'')+
-      '<span class="img-text">'+esc(c.image)+'</span></div>'+
       '<div class="item-meta" style="margin-top:3px;font-size:10px;color:var(--text-muted)">'+esc(c.created)+'</div>'+actions+
       '</div>';
   }).join('');
 }
 
-var sseRebuildTimer=null;
+var sseRebuildTimer=null,sseFailCount=0;
 function startSSE(){
   if(sseSource){sseSource.close();}
   if(sseRebuildTimer){clearTimeout(sseRebuildTimer);sseRebuildTimer=null;}
@@ -808,6 +816,7 @@ function startSSE(){
   if(authToken)url+='?token='+encodeURIComponent(authToken);
   sseSource=new EventSource(url);
   sseSource.onopen=function(){
+    sseFailCount=0;
     var d=document.getElementById('sseDot');
     d.style.background='var(--green)';d.style.boxShadow='0 0 6px var(--green)';
   };
@@ -820,6 +829,8 @@ function startSSE(){
     var d=document.getElementById('sseDot');
     d.style.background='var(--red)';d.style.boxShadow='0 0 6px var(--red)';
     if(sseSource){sseSource.close();sseSource=null;}
+    sseFailCount++;
+    if(sseFailCount>=5){return;}
     if(!sseRebuildTimer){sseRebuildTimer=setTimeout(function(){sseRebuildTimer=null;startSSE();},5000);}
   };
 }
@@ -864,6 +875,7 @@ function connectWS(id){
 }
 function scheduleReconnect(id){
   if(wsReconnectTimer)clearTimeout(wsReconnectTimer);
+  if(wsReconnectDelay>30000){setWS('disconnected');return;}
   setWS('reconnecting ('+Math.round(wsReconnectDelay/1000)+'s)');
   wsReconnectTimer=setTimeout(function(){
     wsReconnectTimer=null;
@@ -1041,7 +1053,7 @@ function renderFiltered(){
   render(filteredContainers());
 }
 
-function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/`/g,'&#96;');}
 
 var fontSize=13;
 function adjustFont(delta){
@@ -1685,7 +1697,7 @@ window.setInterval(function(){
 },10000);
 
 // Event stream
-var eventSource=null,eventRebuildTimer=null;
+var eventSource=null,eventRebuildTimer=null,eventFailCount=0;
 function startEvents(){
   if(eventSource){eventSource.close();}
   if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
@@ -1693,11 +1705,14 @@ function startEvents(){
   var url='/api/events';
   if(authToken)url+='?token='+encodeURIComponent(authToken);
   eventSource=new EventSource(url);
+  eventSource.onopen=function(){eventFailCount=0;};
   eventSource.onmessage=function(e){
     try{var evt=JSON.parse(e.data);showEvent(evt);}catch(err){}
   };
   eventSource.onerror=function(){
     if(eventSource){eventSource.close();eventSource=null;}
+    eventFailCount++;
+    if(eventFailCount>=5){return;}
     if(!eventRebuildTimer){eventRebuildTimer=setTimeout(function(){eventRebuildTimer=null;startEvents();},5000);}
   };
 }

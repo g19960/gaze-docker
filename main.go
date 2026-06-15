@@ -1012,6 +1012,160 @@ func handleAlert(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
+func handleEvents(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", "events", "--format", "{{json .}}")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var raw map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &raw); err != nil {
+			continue
+		}
+		evt := map[string]any{
+			"type":   raw["Type"],
+			"action": raw["Action"],
+			"status": raw["status"],
+			"time":   raw["time"],
+			"id":     "",
+			"name":   "",
+		}
+		if actor, ok := raw["Actor"].(map[string]any); ok {
+			evt["id"] = actor["ID"]
+			if attrs, ok := actor["Attributes"].(map[string]any); ok {
+				evt["name"] = attrs["name"]
+			}
+		}
+		data, _ := json.Marshal(evt)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+}
+
+type AlertRule struct {
+	Name     string `json:"name"`
+	Keywords string `json:"keywords"`
+	Level    string `json:"level"`
+	Action   string `json:"action"`
+}
+
+func alertRulesPath() string {
+	return filepath.Join(gazeConfigDir(), "alert-rules.json")
+}
+
+func handleAlertRules(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	path := alertRulesPath()
+	if r.Method == http.MethodPost {
+		var rules []AlertRule
+		if err := json.NewDecoder(r.Body).Decode(&rules); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		data, _ := json.MarshalIndent(rules, "", "  ")
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		return
+	}
+	data, err := os.ReadFile(path)
+	var rules []AlertRule
+	if err == nil {
+		_ = json.Unmarshal(data, &rules)
+	}
+	if rules == nil {
+		rules = []AlertRule{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rules)
+}
+
+func handleSystemPrune(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	before, _ := exec.Command("docker", "system", "df", "--format", "{{.Type}}:{{.Size}}:{{.Reclaimable}}").Output()
+	out, err := exec.Command("docker", "system", "prune", "-a", "-f", "--volumes").CombinedOutput()
+	after, _ := exec.Command("docker", "system", "df", "--format", "{{.Type}}:{{.Size}}:{{.Reclaimable}}").Output()
+	if err != nil {
+		recordAudit(r, "system.prune", "all", false, string(out))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": string(out)})
+		return
+	}
+	recordAudit(r, "system.prune", "all", true, string(out))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok":     true,
+		"before": strings.TrimSpace(string(before)),
+		"after":  strings.TrimSpace(string(after)),
+		"output": strings.TrimSpace(string(out)),
+	})
+}
+
+func handleContainersHealth(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	containers, err := listContainers(roleAdmin)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	health := map[string]string{}
+	for _, c := range containers {
+		if c.State != "running" {
+			continue
+		}
+		out, err := exec.Command("docker", "inspect", "--format", "{{.State.Health.Status}}", c.ID).Output()
+		if err != nil {
+			continue
+		}
+		h := strings.TrimSpace(string(out))
+		if h == "<no value>" || h == "" {
+			h = "none"
+		}
+		health[c.ID] = h
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(health)
+}
+
 func handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -1676,6 +1830,10 @@ func main() {
 	mux.HandleFunc("/api/templates/delete", handleTemplateDelete)
 	mux.HandleFunc("/api/deploy/history", handleDeployHistory)
 	mux.HandleFunc("/api/alert", handleAlert)
+	mux.HandleFunc("/api/alert/rules", handleAlertRules)
+	mux.HandleFunc("/api/events", handleEvents)
+	mux.HandleFunc("/api/system/prune", handleSystemPrune)
+	mux.HandleFunc("/api/containers/health", handleContainersHealth)
 
 	addr := ":" + listenPort
 	log.Printf("[BUILD] version=%s commit=%s built_at=%s go=%s platform=%s/%s", buildVersion, buildCommit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH)

@@ -300,7 +300,6 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
         <button class="btn on" id="btnAS" onclick="toggleAS()">autoscroll</button>
         <button class="btn" id="btnLoadMore" onclick="loadMoreHistory()" style="display:none">load more</button>
         <button class="btn" onclick="downloadLog()">download</button>
-        <button class="btn" id="btnFmt" onclick="toggleExportFormat()">text</button>
         <button class="btn" onclick="clearLog()">clear</button>
       </div>
     </div>
@@ -1027,26 +1026,18 @@ async function loadMoreHistory(){
   historyLoading=false;
 }
 
-var exportFormat='text';
-function toggleExportFormat(){exportFormat=exportFormat==='text'?'json':'text';document.getElementById('btnFmt').textContent=exportFormat;}
 function downloadLog(){
   var lines=document.querySelectorAll('#out .line:not(.hidden)');
   var parts=[];
   for(var i=0;i<lines.length;i++){
     var ts=lines[i].querySelector('.ts').textContent;
     var msg=lines[i].querySelector('.msg').textContent;
-    var level=lines[i].getAttribute('data-level')||'';
-    if(exportFormat==='json'){
-      parts.push(JSON.stringify({ts:ts,msg:msg,level:level}));
-    }else{
-      parts.push((ts?ts+' ':'')+msg);
-    }
+    parts.push((ts?ts+' ':'')+msg);
   }
-  var blob=new Blob([parts.join('\n')],{type:exportFormat==='json'?'application/json':'text/plain'});
+  var blob=new Blob([parts.join('\n')],{type:'text/plain'});
   var a=document.createElement('a');
   var name=activeId?activeId:'log';
-  var ext=exportFormat==='json'?'jsonl':'log';
-  a.download=name+'-'+new Date().toISOString().replace(/[:.]/g,'-')+'.'+ext;
+  a.download=name+'-'+new Date().toISOString().replace(/[:.]/g,'-')+'.log';
   a.href=URL.createObjectURL(blob);
   a.click();
   URL.revokeObjectURL(a.href);

@@ -701,9 +701,7 @@ function updateImagesTab(){
 
 function showLogin(){
   authToken='';authRole='';sessionStorage.removeItem('token');sessionStorage.removeItem('role');
-  wsWantClose=true;
-  if(ws){ws.close();ws=null;}
-  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
+  closeWS();
   if(sseSource){sseSource.close();sseSource=null;}
   if(sseRebuildTimer){clearTimeout(sseRebuildTimer);sseRebuildTimer=null;}
   if(eventSource){eventSource.close();eventSource=null;}
@@ -729,9 +727,7 @@ async function checkAuth(){
 }
 
 function startMockMode(){
-  wsWantClose=true;
-  if(ws){ws.close();ws=null;}
-  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
+  closeWS();
   if(sseSource){sseSource.close();sseSource=null;}
   if(eventSource){eventSource.close();eventSource=null;}
   if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
@@ -858,30 +854,47 @@ function syncActiveSelection(){
   });
 }
 
-var wsReconnectTimer=null,wsReconnectDelay=1000,wsWantClose=false;
+var wsReconnectTimer=null,wsReconnectDelay=1000,wsEpoch=0;
 function connectWS(id){
   if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
-  if(ws){wsWantClose=true;ws.close();ws=null;}
-  wsWantClose=false;
+  // fresh delay on each new (re)connect attempt
+  var myEpoch=++wsEpoch;
+  if(ws){ws._userClosed=true;ws.close();ws=null;}
   setWS('connecting');
   var proto=location.protocol==='https:'?'wss':'ws';
   var url=proto+'://'+location.host+'/api/logs?id='+id;
   if(authToken)url+='&token='+encodeURIComponent(authToken);
-  try{ws=new WebSocket(url);}catch(e){scheduleReconnect(id);return;}
+  try{ws=new WebSocket(url);}catch(e){scheduleReconnect(id,myEpoch);return;}
   ws.onopen=function(){wsReconnectDelay=1000;setWS('connected');};
   ws.onmessage=function(e){appendLine(e.data);};
-  ws.onclose=function(){if(!wsWantClose){setWS('reconnecting');scheduleReconnect(id);}else{setWS('disconnected');}};
+  ws.onclose=function(){
+    // only reconnect if this socket is still current and wasn't intentionally closed
+    if(this._userClosed){setWS('disconnected');return;}
+    if(myEpoch!==wsEpoch){return;}
+    setWS('reconnecting');
+    scheduleReconnect(id,myEpoch);
+  };
   ws.onerror=function(){};
 }
-function scheduleReconnect(id){
+function scheduleReconnect(id,myEpoch){
   if(wsReconnectTimer)clearTimeout(wsReconnectTimer);
-  if(wsReconnectDelay>30000){setWS('disconnected');return;}
-  setWS('reconnecting ('+Math.round(wsReconnectDelay/1000)+'s)');
+  if(wsReconnectDelay>=30000){setWS('disconnected');return;}
+  if(myEpoch!==wsEpoch){return;}
+  var wait=wsReconnectDelay;
+  wsReconnectDelay=Math.min(wsReconnectDelay*2,30000);
+  setWS('reconnecting ('+Math.round(wait/1000)+'s)');
   wsReconnectTimer=setTimeout(function(){
     wsReconnectTimer=null;
-    wsReconnectDelay=Math.min(wsReconnectDelay*2,30000);
+    if(myEpoch!==wsEpoch){return;}
     connectWS(id);
-  },wsReconnectDelay);
+  },wait);
+}
+function closeWS(){
+  wsEpoch++; // invalidate any pending reconnect for old sockets
+  if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
+  wsReconnectDelay=1000;
+  if(ws){ws._userClosed=true;ws.close();ws=null;}
+  setWS('disconnected');
 }
 
 function appendLine(raw,prepend){
@@ -903,8 +916,7 @@ function appendLine(raw,prepend){
     try{var parsed=JSON.parse(trimmed);displayMsg=JSON.stringify(parsed);}catch(e){}
   }
   d.innerHTML='<span class="ts">'+esc(ts)+'</span><span class="msg '+cls+'">'+esc(displayMsg)+'</span><span class="line-actions"><button class="mini-btn copy-btn" onclick="copyLogLine(this)">copy</button></span>';
-  if(logFilterQuery){applyFilterToLine(d);}
-  if(levelFilter!=='all'&&cls!==levelFilter){d.style.display='none';}
+  applyFilterToLine(d);
   if(prepend){out.insertBefore(d,out.firstChild);}else{out.appendChild(d);}
   if(!prepend&&autoScroll)requestAnimationFrame(function(){out.scrollTop=out.scrollHeight;});
   // notification on error
@@ -931,20 +943,27 @@ function clearLog(){document.getElementById('out').innerHTML='';lineCount=0;docu
 
 function applyFilterToLine(el){
   var raw=el.getAttribute('data-raw')||'';
-  if(!logFilterQuery){el.classList.remove('hidden');el.querySelector('.msg').innerHTML=esc(raw.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*/,''));return;}
-  var match=false;
-  if(logFilterRegex){
-    try{match=new RegExp(logFilterQuery,'i').test(raw);}catch(e){match=false;}
+  var level=el.getAttribute('data-level')||'';
+  // level filter
+  var levelOk=(levelFilter==='all'||level===levelFilter);
+  // text filter
+  var textMatch=true;
+  var msgEl=el.querySelector('.msg');
+  if(!logFilterQuery){
+    msgEl.innerHTML=esc(raw.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s*/,''));
   }else{
-    match=raw.toLowerCase().indexOf(logFilterQuery.toLowerCase())>=0;
+    if(logFilterRegex){
+      try{textMatch=new RegExp(logFilterQuery,'i').test(raw);}catch(e){textMatch=false;}
+    }else{
+      textMatch=raw.toLowerCase().indexOf(logFilterQuery.toLowerCase())>=0;
+    }
+    if(textMatch){
+      var txt=msgEl.textContent;
+      var re=logFilterRegex?(function(){try{return new RegExp('('+logFilterQuery+')','gi');}catch(e){return null;}})():new RegExp('('+logFilterQuery.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+      if(re)msgEl.innerHTML=esc(txt).replace(re,'<mark>$1</mark>');
+    }
   }
-  el.classList.toggle('hidden',!match);
-  if(match&&logFilterQuery){
-    var msgEl=el.querySelector('.msg');
-    var txt=msgEl.textContent;
-    var re=logFilterRegex?(function(){try{return new RegExp('('+logFilterQuery+')','gi');}catch(e){return null;}})():new RegExp('('+logFilterQuery.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
-    if(re)msgEl.innerHTML=esc(txt).replace(re,'<mark>$1</mark>');
-  }
+  el.classList.toggle('hidden',!(levelOk&&textMatch));
 }
 
 function applyLogFilter(){
@@ -1019,9 +1038,7 @@ function togglePause(){logPaused=!logPaused;var b=document.getElementById('btnPa
 function filterLevel(lvl){
   levelFilter=lvl;
   document.querySelectorAll('.level-filter .mini-btn').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-level')===lvl);});
-  document.querySelectorAll('#out .line').forEach(function(line){
-    line.style.display=(lvl==='all'||line.getAttribute('data-level')===lvl)?'':'none';
-  });
+  applyLogFilter();
 }
 function copyLogLine(btn){
   var msg=btn.closest('.line').querySelector('.msg').textContent;
@@ -1032,9 +1049,13 @@ function healthDot(id){
   if(!h||h==='none')return '';
   return '<span class="health-dot health-'+h+'" title="'+h+'"></span>';
 }
+var lastNotifyTs={};
 function maybeNotify(name,msg){
   if(!notifyEnabled||!window.Notification)return;
   if(Notification.permission!=='granted')return;
+  var now=Date.now();
+  if((lastNotifyTs[name]||0)>now-5000)return; // at most one per container per 5s
+  lastNotifyTs[name]=now;
   try{new Notification('Gaze Docker: '+name,{body:msg.substring(0,200)});}catch(e){}
 }
 
@@ -1606,12 +1627,19 @@ async function saveAlertRules(){
   var d=await r.json();
   if(d.ok){renderAlertRules();}else{showToast(t('operationFailed'),'err');}
 }
+var alertFireLog={}; // key: container|rule|keywordBucket -> last fire ts; throttle to avoid per-line flood
 function matchAlertRules(container,msg){
   var l=msg.toLowerCase();
+  var now=Date.now();
   alertRules.forEach(function(rule){
     var kws=rule.keywords.toLowerCase().split(',').map(function(s){return s.trim();});
-    var hit=kws.some(function(k){return k&&l.indexOf(k)>=0;});
-    if(!hit)return;
+    var hitKw=kws.find(function(k){return k&&l.indexOf(k)>=0;});
+    if(!hitKw)return;
+    var key=container+'|'+rule.name+'|'+hitKw;
+    var last=alertFireLog[key]||0;
+    // at most one fire per rule per container per 5s
+    if(now-last<5000)return;
+    alertFireLog[key]=now;
     if(rule.action==='notify'){maybeNotify(container,msg);}
     if(rule.action==='webhook'){
       var url='/api/alert';

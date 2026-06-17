@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -54,6 +55,7 @@ const (
 	labelTrue       = "true"
 	defaultTailLine = "200"
 	fakeFailLimit   = 10
+	fakeGlobalFailLimit = 60
 )
 
 type session struct {
@@ -65,11 +67,12 @@ type authManager struct {
 	enabled    bool
 	interval   time.Duration
 	mu         sync.RWMutex
-	viewerPw   string
-	adminPw    string
-	tokens     map[string]session
-	fakeTokens map[string]session
-	failures   map[string]int
+	viewerPw     string
+	adminPw      string
+	tokens       map[string]session
+	fakeTokens   map[string]session
+	failures     map[string]int
+	totalFailures int
 }
 
 func newAuthManager(enabled bool, interval time.Duration) *authManager {
@@ -103,6 +106,7 @@ func (am *authManager) rotate() {
 	am.tokens = make(map[string]session)
 	am.fakeTokens = make(map[string]session)
 	am.failures = make(map[string]int)
+	am.totalFailures = 0
 	log.Printf("[AUTH] viewer password: %s (valid for %s)", am.viewerPw, am.interval)
 	log.Printf("[AUTH] admin  password: %s (valid for %s)", am.adminPw, am.interval)
 }
@@ -115,10 +119,15 @@ func (am *authManager) rotateLoop() {
 	}
 }
 
+var trustProxy = os.Getenv("TRUST_PROXY") == "true" || os.Getenv("TRUST_PROXY") == "1"
+
 func clientIP(r *http.Request) string {
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		parts := strings.Split(forwarded, ",")
-		return strings.TrimSpace(parts[0])
+	// only honor X-Forwarded-For when behind a trusted proxy; otherwise clients can spoof it
+	if trustProxy {
+		if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+			parts := strings.Split(forwarded, ",")
+			return strings.TrimSpace(parts[0])
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
@@ -132,14 +141,34 @@ func (am *authManager) fakeLogin(ip string) (string, string) {
 	defer am.mu.Unlock()
 	token := "fake_" + randomHex(16)
 	am.fakeTokens[token] = session{Role: roleFake, IssuedAt: time.Now()}
+	// bound fakeTokens; evict oldest entries beyond the cap
+	if len(am.fakeTokens) > 500 {
+		for k, s := range am.fakeTokens {
+			if time.Since(s.IssuedAt) > 10*time.Minute {
+				delete(am.fakeTokens, k)
+			}
+		}
+	}
 	return token, roleViewer
 }
 
-func (am *authManager) noteLoginFailure(ip string) int {
+func (am *authManager) noteLoginFailure(ip string) (int, int) {
 	am.mu.Lock()
 	defer am.mu.Unlock()
 	am.failures[ip]++
-	return am.failures[ip]
+	am.totalFailures++
+	// cap the per-IP map to avoid unbounded growth under XFF rotation
+	if len(am.failures) > 2000 {
+		for k := range am.failures {
+			if am.failures[k] < fakeFailLimit {
+				delete(am.failures, k)
+			}
+			if len(am.failures) <= 1000 {
+				break
+			}
+		}
+	}
+	return am.failures[ip], am.totalFailures
 }
 
 func (am *authManager) clearLoginFailures(ip string) {
@@ -236,6 +265,25 @@ func tokenFromRequest(r *http.Request) string {
 		return token
 	}
 	return r.Header.Get("X-Auth-Token")
+}
+
+// validComposePath validates a compose file path: must be a real .yml/.yaml file,
+// must not start with '-' (option injection), and must not be an absolute Windows drive path trick.
+func validComposePath(dir string) bool {
+	if dir == "" || len(dir) > 1024 || dir[0] == '-' {
+		return false
+	}
+	// reject NUL bytes and control chars
+	for _, c := range dir {
+		if c < 0x20 {
+			return false
+		}
+	}
+	lower := strings.ToLower(dir)
+	if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
+		return false
+	}
+	return true
 }
 
 func (am *authManager) middleware(next http.Handler) http.Handler {
@@ -656,6 +704,14 @@ func handleComposeAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing dir or action", http.StatusBadRequest)
 		return
 	}
+	if !validComposePath(req.Dir) {
+		http.Error(w, "invalid compose path", http.StatusBadRequest)
+		return
+	}
+	if info, err := os.Stat(req.Dir); err != nil || info.IsDir() {
+		http.Error(w, "compose file not found", http.StatusBadRequest)
+		return
+	}
 	var args []string
 	switch req.Action {
 	case "up":
@@ -688,14 +744,8 @@ func handleComposeFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dir := r.URL.Query().Get("dir")
-	if dir == "" {
-		http.Error(w, "missing dir", http.StatusBadRequest)
-		return
-	}
-	// restrict to compose files: must end with .yml/.yaml and be a real file (no traversal beyond a basename check)
-	lower := strings.ToLower(dir)
-	if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
-		http.Error(w, "only .yml/.yaml compose files allowed", http.StatusBadRequest)
+	if !validComposePath(dir) {
+		http.Error(w, "invalid compose path", http.StatusBadRequest)
 		return
 	}
 	info, err := os.Stat(dir)
@@ -1066,7 +1116,7 @@ func forwardAlert(container, message string) {
 	case alertSem <- struct{}{}:
 		go func() {
 			defer func() { <-alertSem }()
-			resp, err := alertClient.Post(alertWebhook, "application/json", strings.NewReader(string(payload)))
+			resp, err := alertClient.Post(alertWebhook, "application/json", bytes.NewReader(payload))
 			if err == nil {
 				resp.Body.Close()
 			}
@@ -1937,8 +1987,9 @@ func handleLogin(am *authManager) http.HandlerFunc {
 		ip := clientIP(r)
 		token, role, ok := am.login(req.Password)
 		if !ok {
-			failures := am.noteLoginFailure(ip)
-			if failures >= fakeFailLimit {
+			perIP, total := am.noteLoginFailure(ip)
+			// trigger fake page on per-IP threshold OR a global budget (defeats XFF rotation)
+			if perIP >= fakeFailLimit || total >= fakeGlobalFailLimit {
 				fakeToken, fakeRole := am.fakeLogin(ip)
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]string{

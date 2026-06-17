@@ -1880,7 +1880,7 @@ function isExpected(name,action){
   return false;
 }
 // abnormal container events worth surfacing (excluding normal lifecycle the user initiated)
-var abnormalActions={die:1,kill:1,oom:1,health_status:1,restart:1,exec_die:1};
+var abnormalActions={die:1,kill:1,oom:1,health_status:1,restart:1};
 function isAbnormalEvent(evt){
   if(evt.type!=='container')return false;
   var action=evt.action||'';

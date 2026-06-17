@@ -1849,9 +1849,9 @@ func handleContainerFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// type,name pairs: F=file, D=dir
-	out, err := exec.Command("docker", "exec", containerID, "sh", "-c",
-		"for f in "+shellQuote(dir)+"/*; do [ -e \"$f\" ] && ([ -d \"$f\" ] && echo -n 'D' || echo -n 'F')+basename \"$f\"; echo; done").Output()
+	// type,name pairs: each line is "Dname" (dir) or "Fname" (file)
+	script := "cd " + shellQuote(dir) + " 2>/dev/null || exit 0; for f in *; do [ -e \"$f\" ] || continue; if [ -d \"$f\" ]; then printf 'D'; else printf 'F'; fi; printf '%s\\n' \"$f\"; done"
+	out, err := exec.Command("docker", "exec", containerID, "sh", "-c", script).Output()
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"path": dir, "files": []ContainerFileEntry{}, "error": strings.TrimSpace(string(out))})

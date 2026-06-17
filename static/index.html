@@ -51,7 +51,7 @@ h1{font-size:13px;font-weight:500;letter-spacing:.15em;text-transform:uppercase;
 .item.active .item-name{color:var(--green)}
 .item-meta{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-dim)}
 .item-actions{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
-.mini-btn{padding:2px 6px;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:9px;border-radius:3px;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text-dim);transition:all .15s;text-transform:uppercase}
+.mini-btn{padding:3px 8px;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:11px;font-weight:500;border-radius:4px;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text);transition:all .15s;text-transform:uppercase}
 .mini-btn:hover{border-color:var(--green);color:var(--green)}
 .mini-btn.danger{border-color:rgba(255,68,85,.45);color:var(--red)}
 .inspect-pre{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;max-height:65vh;overflow:auto;font-size:11px;line-height:1.5;color:var(--text);white-space:pre-wrap;word-break:break-all}
@@ -68,7 +68,7 @@ h1{font-size:13px;font-weight:500;letter-spacing:.15em;text-transform:uppercase;
 .font-ctrl{display:flex;align-items:center;gap:4px}
 .font-ctrl button{width:22px;height:22px;padding:0;display:flex;align-items:center;justify-content:center;font-size:14px;line-height:1}
 .font-size-label{font-size:10px;color:var(--text-dim);min-width:28px;text-align:center}
-.btn{padding:4px 10px;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:10px;letter-spacing:.1em;text-transform:uppercase;border-radius:4px;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text-dim);transition:all .15s}
+.btn{padding:6px 13px;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:12px;font-weight:500;letter-spacing:.08em;text-transform:uppercase;border-radius:5px;cursor:pointer;border:1px solid var(--border2);background:var(--bg3);color:var(--text);transition:all .15s}
 .btn:hover{border-color:var(--green);color:var(--green)}
 .btn.on{background:rgba(0,255,136,.1);border-color:var(--green);color:var(--green)}
 .ws{font-size:10px;padding:2px 8px;border-radius:3px;border:1px solid var(--border)}
@@ -115,7 +115,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
 .stat-card{display:flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid var(--border);border-radius:999px;background:var(--bg3)}
 .stat-label{letter-spacing:.08em;text-transform:uppercase;color:var(--text-muted)}
 .stat-val{color:var(--green);font-weight:500}
-.tab{padding:8px 20px;font-size:11px;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;border:none;background:none;color:var(--text-dim);border-bottom:2px solid transparent;transition:all .15s;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace}
+.tab{padding:9px 22px;font-size:13px;font-weight:500;letter-spacing:.1em;text-transform:uppercase;cursor:pointer;border:none;background:none;color:var(--text-dim);border-bottom:2px solid transparent;transition:all .15s;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace}
 .tab:hover{color:var(--text)}
 .tab.active{color:var(--green);border-bottom-color:var(--green)}
 .images-panel{display:none;flex:1;flex-direction:column;overflow:hidden}
@@ -590,6 +590,7 @@ function applyLang(){
   setPlaceholder('searchInput','filterContainers');
   setPlaceholder('logFilter','filterLogs');
   document.getElementById('btnAS').textContent=t('autoscroll');
+  var btnPause=document.getElementById('btnPause');if(btnPause)btnPause.textContent=logPaused?t('resume'):t('pause');
   document.getElementById('btnLoadMore').textContent=t('loadMore');
   document.querySelector('button[onclick="downloadLog()"]').textContent=t('download');
   document.querySelector('button[onclick="clearLog()"]').textContent=t('clear');
@@ -1160,6 +1161,9 @@ document.getElementById('list').addEventListener('click',function(event){
 async function containerAction(id,action,event){
   if(event)event.stopPropagation();
   if(action==='remove'&&!confirm(t('confirmRemoveContainer')+' '+id+'?'))return;
+  // mark this as expected so the event stream doesn't notify our own action
+  var c=null;for(var i=0;i<containers.length;i++){if(containers[i].id===id){c=containers[i];break;}}
+  if(c){markExpected(c.name,action==='remove'?'destroy':action);}
   try{
     var url='/api/containers/action';
     if(authToken)url+='?token='+encodeURIComponent(authToken);
@@ -1832,16 +1836,44 @@ function startEvents(){
     if(!eventRebuildTimer){eventRebuildTimer=setTimeout(function(){eventRebuildTimer=null;startEvents();},5000);}
   };
 }
+// Events that are worth notifying: unexpected state changes (not user's own actions, not normal start/stop)
+var expectedActions={}; // key: containerName|action -> expiry timestamp
+function markExpected(name,action){
+  // window of 8s after a user-initiated op during which matching events are suppressed
+  expectedActions[name+'|'+action]=Date.now()+8000;
+}
+function isExpected(name,action){
+  var k=name+'|'+action;
+  var exp=expectedActions[k];
+  if(exp&&exp>Date.now()){return true;}
+  if(exp){delete expectedActions[k];}
+  return false;
+}
+// abnormal container events worth surfacing (excluding normal lifecycle the user initiated)
+var abnormalActions={die:1,kill:1,oom:1,health_status:1,restart:1,exec_die:1};
+function isAbnormalEvent(evt){
+  if(evt.type!=='container')return false;
+  var action=evt.action||'';
+  // strip the " (exit N)" / health sub-type; treat die/oom/restart/health as notable
+  var base=action.split(' ')[0];
+  return !!abnormalActions[base];
+}
 function showEvent(evt){
+  // Only surface abnormal state changes; ignore normal start/stop/create and the user's own ops
+  if(!isAbnormalEvent(evt))return;
+  var name=evt.name||'';
+  var action=(evt.action||evt.status||'').split(' ')[0];
+  if(isExpected(name,action))return; // user just did this themselves
   var rail=document.getElementById('eventRail');
   var card=document.createElement('div');
   card.className='event-card type-'+(evt.type||'container');
   var idStr=evt.id?String(evt.id).substring(0,12):'';
-  card.innerHTML='<div class="event-card-head"><span>'+esc(evt.type||'')+'</span><span>'+esc(evt.action||evt.status||'')+'</span></div>'+
-    '<div class="event-action">'+esc(evt.action||evt.status||'')+'</div>'+
-    (evt.name?'<div class="event-name">'+esc(evt.name)+'</div>':'')+
+  var sev=/oom|kill|die/i.test(action)?'var(--red)':(/restart|health/i.test(action)?'var(--yellow)':'var(--green)');
+  card.innerHTML='<div class="event-card-head"><span>'+esc(evt.type||'')+'</span><span style="color:'+sev+'">'+esc(action)+'</span></div>'+
+    '<div class="event-action" style="color:'+sev+'">'+esc(evt.action||evt.status||'')+'</div>'+
+    (name?'<div class="event-name">'+esc(name)+'</div>':'')+
     (idStr?'<div style="font-size:9px;color:var(--text-muted);margin-top:2px">'+esc(idStr)+'</div>':'');
-  var containerName=evt.name;
+  var containerName=name;
   card.addEventListener('click',function(){
     if(containerName&&evt.type==='container'){
       var item=document.querySelector('#list .item[data-name="'+containerName+'"]');
@@ -1857,6 +1889,10 @@ function showEvent(evt){
   card.addEventListener('mouseleave',function(){
     timer=setTimeout(function(){card.classList.remove('show');setTimeout(function(){if(card.parentNode)card.parentNode.removeChild(card);},400);},1500);
   });
+  // also fire desktop notification for the most severe
+  if(notifyEnabled&&/oom|kill|die/i.test(action)){
+    maybeNotify(name,evt.action||evt.status||'');
+  }
 }
 
 // Audit

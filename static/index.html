@@ -464,11 +464,20 @@ services:
   </div>
 </div>
 <div class="modal-overlay" id="execModal">
-  <div class="modal" style="width:min(800px,94vw)">
+  <div class="modal" style="width:min(1100px,96vw)">
     <h2 id="execTitle">Terminal</h2>
-    <div class="terminal" id="terminalOut"></div>
-    <input class="terminal-input" id="terminalInput" placeholder="type command and press enter (↑/↓ for history)..." onkeydown="execInputKey(event)" autocomplete="off" spellcheck="false">
+    <div style="display:flex;gap:12px;height:60vh">
+      <div style="flex:1.4;display:flex;flex-direction:column;min-width:0">
+        <div class="terminal" id="terminalOut" style="flex:1;height:auto"></div>
+        <input class="terminal-input" id="terminalInput" placeholder="type command and press enter (↑/↓ for history)..." onkeydown="execInputKey(event)" autocomplete="off" spellcheck="false">
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0;border:1px solid var(--border);border-radius:6px;background:var(--bg2)">
+        <div class="file-path" id="cfmPath" style="border:none;border-bottom:1px solid var(--border);border-radius:0">/</div>
+        <div class="file-list" id="cfmList" style="max-height:none;flex:1;border:none"><div class="loading">...</div></div>
+      </div>
+    </div>
     <div class="modal-actions">
+      <button class="btn" onclick="cfmUp()">↑ up</button>
       <button class="btn" onclick="closeExecModal()">close</button>
     </div>
   </div>
@@ -937,7 +946,7 @@ function appendLine(raw,prepend){
   if(prepend){out.insertBefore(d,out.firstChild);}else{out.appendChild(d);}
   if(!prepend&&autoScroll)requestAnimationFrame(function(){out.scrollTop=out.scrollHeight;});
   // notification on error
-  if(cls==='err'&&!prepend){maybeNotify(activeName||'',msg);}
+  if(cls==='err'&&!prepend){checkNotifyPermission();maybeNotify(activeName||'',msg);}
   if(!prepend){matchAlertRules(activeName||'',msg);}
 }
 
@@ -1577,6 +1586,7 @@ function openExec(id,name,event){
   var url=proto+'://'+location.host+'/api/exec?id='+encodeURIComponent(id);
   if(authToken)url+='&token='+encodeURIComponent(authToken);
   execWs=new WebSocket(url);
+  cfmInit(id);
   execWs.onmessage=function(e){
     var out=document.getElementById('terminalOut');
     var span=document.createElement('span');
@@ -1620,6 +1630,41 @@ function execInputKey(e){
   }
 }
 function closeExecModal(){if(execWs){execWs.close();execWs=null;}closeModal('execModal');}
+
+// Container file manager (lives beside exec terminal)
+var cfmPath='/';
+function cfmInit(id){
+  cfmPath='/';
+  cfmLoad(id,'/');
+}
+async function cfmLoad(id,path){
+  cfmPath=path;
+  document.getElementById('cfmPath').textContent=path;
+  document.getElementById('cfmList').innerHTML='<div class="loading"><span class="spin"></span></div>';
+  var url='/api/containers/files?id='+encodeURIComponent(id)+'&path='+encodeURIComponent(path);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  try{
+    var r=await fetch(url);
+    var d=await r.json()||{};
+    if(d.error){document.getElementById('cfmList').innerHTML='<div class="file-row" style="color:var(--red)">'+esc(d.error)+'</div>';return;}
+    cfmRender(d.files||[],execContainerId,path);
+  }catch(e){document.getElementById('cfmList').innerHTML='<div class="file-row" style="color:var(--red)">failed</div>';}
+}
+function cfmRender(files,id,path){
+  var html='';
+  if(!files.length){html='<div class="file-row"><span class="file-name" style="color:var(--text-muted)">(empty)</span></div>';}
+  files.forEach(function(f){
+    var action=f.isDir?' onclick="cfmLoad(execContainerId,\''+esc(f.path).replace(/'/g,"\\'")+'\')"':'';
+    var icon=f.isDir?'▸':'•';
+    html+='<div class="file-row"'+action+'><span class="file-icon">'+icon+'</span><span class="file-name">'+esc(f.name)+'</span></div>';
+  });
+  document.getElementById('cfmList').innerHTML=html;
+}
+function cfmUp(){
+  var p=cfmPath.replace(/\/$/,'');
+  var i=p.lastIndexOf('/');
+  cfmLoad(execContainerId,i<=0?'/':p.substring(0,i));
+}
 
 // Templates
 function showTemplateModal(){

@@ -1812,6 +1812,70 @@ func handleImageInspect(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+type ContainerFileEntry struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	IsDir bool   `json:"isDir"`
+}
+
+// handleContainerFiles lists files inside a running container via `docker exec ls`.
+func handleContainerFiles(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	containerID := r.URL.Query().Get("id")
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
+		return
+	}
+	allowed, err := hasAccessToContainer(roleFromRequest(r), containerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	dir := r.URL.Query().Get("path")
+	if dir == "" {
+		dir = "/"
+	}
+	// reject control chars / NUL; keep it simple — ls will reject invalid paths anyway
+	for _, c := range dir {
+		if c < 0x20 {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+	}
+	// type,name pairs: F=file, D=dir
+	out, err := exec.Command("docker", "exec", containerID, "sh", "-c",
+		"for f in "+shellQuote(dir)+"/*; do [ -e \"$f\" ] && ([ -d \"$f\" ] && echo -n 'D' || echo -n 'F')+basename \"$f\"; echo; done").Output()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"path": dir, "files": []ContainerFileEntry{}, "error": strings.TrimSpace(string(out))})
+		return
+	}
+	var entries []ContainerFileEntry
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if len(line) < 2 {
+			continue
+		}
+		isDir := line[0] == 'D'
+		name := line[1:]
+		full := strings.TrimRight(dir, "/") + "/" + name
+		entries = append(entries, ContainerFileEntry{Name: name, Path: full, IsDir: isDir})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"path": dir, "files": entries})
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 func handleExec(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -2098,6 +2162,7 @@ func main() {
 	mux.HandleFunc("/api/images/inspect", handleImageInspect)
 	mux.HandleFunc("/api/images/cleanup", handleImagesCleanup)
 	mux.HandleFunc("/api/exec", handleExec)
+	mux.HandleFunc("/api/containers/files", handleContainerFiles)
 	mux.HandleFunc("/api/templates", handleTemplates)
 	mux.HandleFunc("/api/templates/delete", handleTemplateDelete)
 	mux.HandleFunc("/api/deploy/history", handleDeployHistory)

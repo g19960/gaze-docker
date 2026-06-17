@@ -172,11 +172,21 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
 .stat-chart{display:flex;align-items:flex-end;gap:3px;height:48px;padding:8px 0}
 .stat-chart-bar{flex:1;background:var(--green);border-radius:2px 2px 0 0;min-height:2px;opacity:.7;transition:height .3s}
 .terminal{background:#000;color:#0f0;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:12px;padding:10px;border-radius:6px;height:60vh;overflow-y:auto;white-space:pre-wrap;word-break:break-all;line-height:1.5}
+.term-cmd{color:#0ff;border-top:1px solid #1a3a1a;margin-top:6px;padding-top:4px}
+.term-ts{color:#666;font-size:10px;margin-right:6px}
+.term-prompt{color:#fff;margin-right:4px}
 .terminal-input{width:100%;background:#000;border:1px solid var(--border);border-radius:4px;padding:8px;color:#0f0;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:12px;outline:none;margin-top:8px}
 .template-card{border:1px solid var(--border);border-radius:6px;padding:12px;margin-bottom:8px;background:var(--bg2)}
 .template-card-name{font-weight:500;color:var(--cyan);margin-bottom:6px}
 .json-toggle{color:var(--yellow);cursor:pointer;font-size:10px;margin-right:6px}
 .copy-btn{padding:1px 5px;font-size:9px}
+.perf-panel{position:fixed;left:0;top:60px;bottom:0;width:300px;background:var(--bg2);border-right:1px solid var(--border);z-index:95;display:none;flex-direction:column;box-shadow:4px 0 20px rgba(0,0,0,.2)}
+.perf-panel.show{display:flex}
+.perf-hdr{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.1em}
+.perf-body{flex:1;overflow-y:auto;padding:12px}
+.perf-title{font-size:12px;color:var(--cyan);margin-bottom:6px;word-break:break-all}
+.perf-metric{display:flex;justify-content:space-between;font-size:11px;padding:3px 0;color:var(--text-dim)}
+.perf-metric b{color:var(--text);font-weight:500}
 .event-rail{position:fixed;top:60px;right:0;width:320px;max-height:80vh;overflow-y:auto;z-index:90;display:flex;flex-direction:column;gap:6px;padding:10px;pointer-events:none}
 .event-rail::-webkit-scrollbar{width:0}
 .event-card{pointer-events:auto;background:var(--bg2);border:1px solid var(--border);border-left:3px solid var(--green);border-radius:6px;padding:8px 10px;font-size:11px;box-shadow:0 4px 12px rgba(0,0,0,.15);cursor:pointer;transform:translateX(340px);opacity:0;transition:transform .3s,opacity .3s}
@@ -423,11 +433,18 @@ services:
     <h2>Container Inspect</h2>
     <div id="portsSection" style="margin-bottom:10px"></div>
     <pre class="inspect-pre" id="containerInspectPre">Loading...</pre>
-    <div class="stat-chart" id="containerChart"></div>
     <div class="modal-actions">
+      <button class="btn" onclick="togglePerfPanel()" id="btnPerf">performance</button>
       <button class="btn" onclick="closeModal('containerInspectModal')">close</button>
     </div>
   </div>
+</div>
+<div class="perf-panel" id="perfPanel">
+  <div class="perf-hdr">
+    <span>Performance</span>
+    <button class="mini-btn" onclick="togglePerfPanel()">×</button>
+  </div>
+  <div class="perf-body" id="perfBody"></div>
 </div>
 <div class="modal-overlay" id="imageInspectModal">
   <div class="modal" style="width:min(900px,94vw)">
@@ -451,7 +468,7 @@ services:
   <div class="modal" style="width:min(800px,94vw)">
     <h2 id="execTitle">Terminal</h2>
     <div class="terminal" id="terminalOut"></div>
-    <input class="terminal-input" id="terminalInput" placeholder="type command and press enter..." onkeydown="if(event.key==='Enter'){sendExecCmd(this.value);this.value=''}">
+    <input class="terminal-input" id="terminalInput" placeholder="type command and press enter (↑/↓ for history)..." onkeydown="execInputKey(event)" autocomplete="off" spellcheck="false">
     <div class="modal-actions">
       <button class="btn" onclick="closeExecModal()">close</button>
     </div>
@@ -1040,9 +1057,23 @@ function filterLevel(lvl){
   document.querySelectorAll('.level-filter .mini-btn').forEach(function(b){b.classList.toggle('active',b.getAttribute('data-level')===lvl);});
   applyLogFilter();
 }
+function copyToClipboard(text){
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text).catch(function(){fallbackCopy(text);});
+  }else{
+    fallbackCopy(text);
+  }
+}
+function fallbackCopy(text){
+  var ta=document.createElement('textarea');
+  ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+  document.body.appendChild(ta);ta.select();
+  try{document.execCommand('copy');}catch(e){}
+  document.body.removeChild(ta);
+}
 function copyLogLine(btn){
   var msg=btn.closest('.line').querySelector('.msg').textContent;
-  navigator.clipboard.writeText(msg);
+  copyToClipboard(msg);
 }
 function healthDot(id){
   var h=(window.healthMap||{})[id];
@@ -1156,17 +1187,15 @@ function renderPorts(portsStr){
   html+='</div>';
   el.innerHTML=html;
 }
-function copyPort(p){navigator.clipboard.writeText(p);showToast('copied: '+p,'ok');}
+function copyPort(p){copyToClipboard(p);showToast('copied: '+p,'ok');}
 async function showContainerInspect(id,event){
   if(event)event.stopPropagation();
-  chartId=id;chartCpu=[];chartMem=[];
+  chartId=id;
   document.getElementById('containerInspectModal').classList.add('show');
   document.getElementById('containerInspectPre').textContent=t('loading');
-  document.getElementById('containerChart').innerHTML='<svg class="chart-svg" id="chartSvg" viewBox="0 0 200 40" preserveAspectRatio="none"></svg><div class="chart-legend"><span style="color:var(--green)">■ CPU</span><span style="color:var(--cyan)">■ MEM</span></div>';
   var c=null;
   for(var i=0;i<containers.length;i++){if(containers[i].id===id){c=containers[i];break;}}
   renderPorts(c?c.ports:'');
-  startChartPolling();
   try{
     var url='/api/containers/inspect?id='+encodeURIComponent(id);
     if(authToken)url+='&token='+encodeURIComponent(authToken);
@@ -1178,38 +1207,62 @@ async function showContainerInspect(id,event){
     document.getElementById('containerInspectPre').textContent=e.message||t('operationFailed');
   }
 }
+// Performance side panel
+var chartTimer=null,chartCpu=[],chartMem=[],chartId='';
+function togglePerfPanel(){
+  var p=document.getElementById('perfPanel');
+  if(p.classList.contains('show')){
+    p.classList.remove('show');
+    if(chartTimer){clearInterval(chartTimer);chartTimer=null;}
+  }else{
+    if(!chartId){showToast('open a container inspect first','err');return;}
+    p.classList.add('show');
+    chartCpu=[];chartMem=[];
+    startChartPolling();
+  }
+}
 function startChartPolling(){
   if(chartTimer)clearInterval(chartTimer);
   pollChart();
   chartTimer=setInterval(pollChart,3000);
 }
 async function pollChart(){
-  if(!document.getElementById('containerInspectModal').classList.contains('show')){clearInterval(chartTimer);chartTimer=null;return;}
+  if(!document.getElementById('perfPanel').classList.contains('show')){if(chartTimer){clearInterval(chartTimer);chartTimer=null;}return;}
   try{
     var url='/api/containers/stats';
     if(authToken)url+='?token='+encodeURIComponent(authToken);
     var r=await fetch(url);
     var stats=await r.json()||[];
     var s=null;
-    for(var i=0;i<stats.length;i++){if(stats[i].id===chartId||stats[i].id.indexOf(chartId)===0){s=stats[i];break;}}
+    for(var i=0;i<stats.length;i++){if(stats[i].id===chartId||chartId.indexOf(stats[i].id)===0){s=stats[i];break;}}
     if(!s)return;
     chartCpu.push(s.cpu);chartMem.push(s.mem_pct);
     if(chartCpu.length>40)chartCpu.shift();
     if(chartMem.length>40)chartMem.shift();
-    drawChart();
+    drawPerfPanel(s);
   }catch(e){}
 }
-function drawChart(){
-  var svg=document.getElementById('chartSvg');
-  if(!svg)return;
+function drawPerfPanel(s){
+  var body=document.getElementById('perfBody');
+  if(!body)return;
   var toPoints=function(arr){
     if(!arr.length)return '';
     var pts=[];
     for(var i=0;i<arr.length;i++){var x=(i/39)*200;var y=40-Math.min(arr[i],100)/100*40;pts.push(x.toFixed(1)+','+y.toFixed(1));}
     return pts.join(' ');
   };
-  svg.innerHTML='<polyline points="'+toPoints(chartCpu)+'" fill="none" stroke="var(--green)" stroke-width="1"/>'+
-    '<polyline points="'+toPoints(chartMem)+'" fill="none" stroke="var(--cyan)" stroke-width="1"/>';
+  body.innerHTML='<div class="perf-title">'+esc(s.name||chartId)+'</div>'+
+    '<svg class="chart-svg" viewBox="0 0 200 40" preserveAspectRatio="none" style="height:60px">'+
+    '<polyline points="'+toPoints(chartCpu)+'" fill="none" stroke="var(--green)" stroke-width="1"/>'+
+    '<polyline points="'+toPoints(chartMem)+'" fill="none" stroke="var(--cyan)" stroke-width="1"/></svg>'+
+    '<div class="chart-legend"><span style="color:var(--green)">■ CPU</span><span style="color:var(--cyan)">■ MEM</span></div>'+
+    '<div style="margin-top:12px">'+
+    '<div class="perf-metric"><span>CPU</span><b>'+s.cpu.toFixed(1)+'%</b></div>'+
+    '<div class="perf-metric"><span>MEM</span><b>'+s.mem_use+' ('+s.mem_pct.toFixed(1)+'%)</b></div>'+
+    '<div class="perf-metric"><span>NET I/O</span><b>'+esc(s.net_io)+'</b></div>'+
+    '<div class="perf-metric"><span>BLOCK I/O</span><b>'+esc(s.block)+'</b></div>'+
+    '<div class="perf-metric"><span>PIDs</span><b>'+esc(s.pids)+'</b></div>'+
+    '</div>';
 }
 
 
@@ -1514,12 +1567,16 @@ async function showImageInspect(id){
 }
 
 // Exec terminal
-var execWs=null;
+var execWs=null,execHistory=[],execHistIdx=-1,execContainerId='';
 function openExec(id,name,event){
   if(event)event.stopPropagation();
+  execContainerId=id;
+  execHistory=(JSON.parse(localStorage.getItem('execHistory_'+id)||'[]'));
+  execHistIdx=execHistory.length;
   document.getElementById('execModal').classList.add('show');
   document.getElementById('execTitle').textContent=t('execTerminal')+': '+name;
-  document.getElementById('terminalOut').textContent='';
+  document.getElementById('terminalOut').innerHTML='<div style="color:#666">// '+t('execTerminal')+' ready. commands run via <code style="color:#0ff">docker exec -i</code>.</div>';
+  document.getElementById('terminalInput').value='';
   if(execWs){execWs.close();execWs=null;}
   var proto=location.protocol==='https:'?'wss':'ws';
   var url=proto+'://'+location.host+'/api/exec?id='+encodeURIComponent(id);
@@ -1527,13 +1584,45 @@ function openExec(id,name,event){
   execWs=new WebSocket(url);
   execWs.onmessage=function(e){
     var out=document.getElementById('terminalOut');
-    out.textContent+=e.data;
+    var span=document.createElement('span');
+    span.textContent=e.data;
+    out.appendChild(span);
     out.scrollTop=out.scrollHeight;
   };
   execWs.onclose=function(){};
 }
 function sendExecCmd(cmd){
-  if(execWs&&execWs.readyState===1){execWs.send(cmd);}
+  if(!cmd)return;
+  if(execWs&&execWs.readyState===1){
+    execWs.send(cmd);
+  }
+  // record history (dedupe consecutive)
+  if(execHistory[execHistory.length-1]!==cmd){
+    execHistory.push(cmd);
+    if(execHistory.length>100)execHistory.shift();
+    try{localStorage.setItem('execHistory_'+execContainerId,JSON.stringify(execHistory));}catch(e){}
+  }
+  execHistIdx=execHistory.length;
+  // render command block with timestamp + divider
+  var out=document.getElementById('terminalOut');
+  var block=document.createElement('div');
+  block.className='term-cmd';
+  var ts=new Date().toLocaleTimeString();
+  block.innerHTML='<span class="term-ts">['+esc(ts)+']</span><span class="term-prompt">$</span>'+esc(cmd);
+  out.appendChild(block);
+  out.scrollTop=out.scrollHeight;
+}
+function execInputKey(e){
+  if(e.key==='Enter'){
+    var input=e.target;
+    sendExecCmd(input.value);
+    input.value='';
+  }else if(e.key==='ArrowUp'){
+    if(execHistIdx>0){execHistIdx--;e.target.value=execHistory[execHistIdx]||'';e.preventDefault();}
+  }else if(e.key==='ArrowDown'){
+    if(execHistIdx<execHistory.length-1){execHistIdx++;e.target.value=execHistory[execHistIdx]||'';}else{execHistIdx=execHistory.length;e.target.value='';}
+    e.preventDefault();
+  }
 }
 function closeExecModal(){if(execWs){execWs.close();execWs=null;}closeModal('execModal');}
 

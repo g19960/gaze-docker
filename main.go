@@ -1691,6 +1691,65 @@ func parsePercent(v string) float64 {
 	return f
 }
 
+// humanSize formats bytes as a human-readable string (KB/MB/GB/TB).
+func humanSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%dB", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB"}
+	if exp >= len(units) {
+		exp = len(units) - 1
+	}
+	return fmt.Sprintf("%.2f%s", float64(bytes)/float64(div), units[exp])
+}
+
+// sampleHostCPU reads /proc/stat twice (200ms apart) and returns host CPU usage %.
+func sampleHostCPU() (float64, bool) {
+	readStat := func() (idle, total uint64, ok bool) {
+		data, err := os.ReadFile("/proc/stat")
+		if err != nil {
+			return 0, 0, false
+		}
+		line := strings.SplitN(string(data), "\n", 2)[0]
+		fields := strings.Fields(line)
+		if len(fields) < 5 || fields[0] != "cpu" {
+			return 0, 0, false
+		}
+		var sums [10]uint64
+		for i := 1; i < len(fields) && i-1 < len(sums); i++ {
+			v, _ := strconv.ParseUint(fields[i], 10, 64)
+			sums[i-1] = v
+		}
+		for _, v := range sums {
+			total += v
+		}
+		idle = sums[3] + sums[4]
+		return idle, total, true
+	}
+	idle1, total1, ok := readStat()
+	if !ok {
+		return 0, false
+	}
+	time.Sleep(200 * time.Millisecond)
+	idle2, total2, ok := readStat()
+	if !ok || total2 == total1 {
+		return 0, false
+	}
+	totalDelta := total2 - total1
+	idleDelta := idle2 - idle1
+	if totalDelta == 0 {
+		return 0, false
+	}
+	usage := (float64(totalDelta-idleDelta) / float64(totalDelta)) * 100
+	return usage, true
+}
+
 type ContainerStat struct {
 	ID     string  `json:"id"`
 	Name   string  `json:"name"`
@@ -2084,28 +2143,41 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	if images, err := listImages(); err == nil {
 		stats.ImagesCount = len(images)
 	}
-	if out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}").Output(); err == nil {
-		var cpu float64
-		var memUsed, memTotal, memPct string
-		scanner := bufio.NewScanner(strings.NewReader(string(out)))
-		for scanner.Scan() {
-			parts := strings.Split(scanner.Text(), "\t")
-			if len(parts) < 3 {
-				continue
+	// Host memory from /proc/meminfo (matches `free`): used = total - available
+	if runtime.GOOS != "windows" {
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			var memTotalKB, memAvailKB int64
+			for _, line := range strings.Split(string(data), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) >= 2 {
+					switch fields[0] {
+					case "MemTotal:":
+						memTotalKB, _ = strconv.ParseInt(fields[1], 10, 64)
+					case "MemAvailable:":
+						memAvailKB, _ = strconv.ParseInt(fields[1], 10, 64)
+					}
+				}
 			}
-			cpu += parsePercent(parts[0])
-			memPct = parts[2]
-			usage := strings.Split(parts[1], " / ")
-			if len(usage) == 2 {
-				memUsed = usage[0]
-				memTotal = usage[1]
+			if memTotalKB > 0 {
+				usedKB := memTotalKB - memAvailKB
+				pct := float64(usedKB) / float64(memTotalKB) * 100
+				stats.MemoryUsed = humanSize(usedKB * 1024)
+				stats.MemoryTotal = humanSize(memTotalKB * 1024)
+				stats.MemoryPct = fmt.Sprintf("%.1f%%", pct)
 			}
 		}
-		stats.CPUUsage = fmt.Sprintf("%.1f%%", cpu)
-		if memUsed != "" {
-			stats.MemoryUsed = memUsed
-			stats.MemoryTotal = memTotal
-			stats.MemoryPct = memPct
+		// Host CPU from /proc/stat sampled twice (real host load, not container process sum)
+		if cpu, ok := sampleHostCPU(); ok {
+			stats.CPUUsage = fmt.Sprintf("%.1f%%", cpu)
+		}
+	} else {
+		// Windows fallback: container stats sum
+		if out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.CPUPerc}}").Output(); err == nil {
+			var cpu float64
+			for _, line := range strings.Split(string(out), "\n") {
+				cpu += parsePercent(line)
+			}
+			stats.CPUUsage = fmt.Sprintf("%.1f%%", cpu)
 		}
 	}
 	if runtime.GOOS != "windows" {

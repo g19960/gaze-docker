@@ -16,12 +16,21 @@ services:
       # Default: 8080
       PORT: "8080"
 
-      # Enable password authentication
+      # Enable password authentication (master switch)
       # Values: false / 0 (disabled) | true / 1 (enabled)
       # Default: false
       AUTH: "true"
 
+      # Viewer auth: enable viewer password (read-only role)
+      # If unset, follows AUTH. Set false to allow passwordless read-only access.
+      # VIEWER_AUTH: "true"
+
+      # Admin auth: enable admin password (full management)
+      # If unset, follows AUTH. Set false to allow passwordless admin access.
+      # ADMIN_AUTH: "true"
+
       # Password rotation interval for viewer/admin credentials
+      # Only the credentials whose auth is enabled are rotated.
       # Go duration format: 30m, 1h, 12h, 24h
       # Default: 1h
       AUTH_ROTATE: "1h"

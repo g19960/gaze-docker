@@ -65,6 +65,8 @@ type session struct {
 
 type authManager struct {
 	enabled    bool
+	viewerAuth bool
+	adminAuth  bool
 	interval   time.Duration
 	mu         sync.RWMutex
 	viewerPw     string
@@ -75,15 +77,17 @@ type authManager struct {
 	totalFailures int
 }
 
-func newAuthManager(enabled bool, interval time.Duration) *authManager {
+func newAuthManager(enabled, viewerAuth, adminAuth bool, interval time.Duration) *authManager {
 	am := &authManager{
 		enabled:    enabled,
+		viewerAuth: viewerAuth,
+		adminAuth:  adminAuth,
 		interval:   interval,
 		tokens:     make(map[string]session),
 		fakeTokens: make(map[string]session),
 		failures:   make(map[string]int),
 	}
-	if enabled {
+	if enabled && (viewerAuth || adminAuth) {
 		am.rotate()
 		go am.rotateLoop()
 	}
@@ -101,14 +105,24 @@ func randomHex(byteLen int) string {
 func (am *authManager) rotate() {
 	am.mu.Lock()
 	defer am.mu.Unlock()
-	am.viewerPw = randomHex(4)
-	am.adminPw = randomHex(4)
+	if am.viewerAuth {
+		am.viewerPw = randomHex(4)
+		log.Printf("[AUTH] viewer password: %s (valid for %s)", am.viewerPw, am.interval)
+	} else {
+		am.viewerPw = ""
+		log.Printf("[AUTH] viewer auth disabled (no password needed)")
+	}
+	if am.adminAuth {
+		am.adminPw = randomHex(4)
+		log.Printf("[AUTH] admin  password: %s (valid for %s)", am.adminPw, am.interval)
+	} else {
+		am.adminPw = ""
+		log.Printf("[AUTH] admin auth disabled (no password needed)")
+	}
 	am.tokens = make(map[string]session)
 	am.fakeTokens = make(map[string]session)
 	am.failures = make(map[string]int)
 	am.totalFailures = 0
-	log.Printf("[AUTH] viewer password: %s (valid for %s)", am.viewerPw, am.interval)
-	log.Printf("[AUTH] admin  password: %s (valid for %s)", am.adminPw, am.interval)
 }
 
 func (am *authManager) rotateLoop() {
@@ -185,20 +199,34 @@ func (am *authManager) isFakeToken(token string) bool {
 }
 
 func (am *authManager) login(password string) (string, string, bool) {
-	if !am.enabled {
+	if !am.enabled || (!am.viewerAuth && !am.adminAuth) {
+		// auth fully off -> admin session
 		return "", roleAdmin, true
 	}
-
 	am.mu.Lock()
 	defer am.mu.Unlock()
 
 	role := ""
-	switch password {
-	case am.viewerPw:
-		role = roleViewer
-	case am.adminPw:
-		role = roleAdmin
-	default:
+	// empty password matches any role whose auth is disabled (passwordless)
+	if password == "" {
+		if !am.adminAuth {
+			role = roleAdmin
+		} else if !am.viewerAuth {
+			role = roleViewer
+		}
+	} else {
+		switch password {
+		case am.viewerPw:
+			if am.viewerAuth {
+				role = roleViewer
+			}
+		case am.adminPw:
+			if am.adminAuth {
+				role = roleAdmin
+			}
+		}
+	}
+	if role == "" {
 		return "", "", false
 	}
 
@@ -484,13 +512,18 @@ func handleContainerAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleContainerInspect(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	containerID := r.URL.Query().Get("id")
 	if !validID(containerID) {
 		http.Error(w, "invalid container id", http.StatusBadRequest)
+		return
+	}
+	allowed, err := hasAccessToContainer(roleFromRequest(r), containerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 	out, err := exec.Command("docker", "inspect", "--", containerID).CombinedOutput()
@@ -1316,11 +1349,7 @@ func handleSystemPrune(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleContainersHealth(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-	containers, err := listContainers(roleAdmin)
+	containers, err := listContainers(roleFromRequest(r))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1762,10 +1791,6 @@ type ContainerStat struct {
 }
 
 func handleContainerStats(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}").Output()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2127,10 +2152,6 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleStats(w http.ResponseWriter, r *http.Request) {
-	if !requireAdmin(r) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	stats := ServerStats{CPUUsage: "0%", MemoryUsed: "-", MemoryTotal: "-", MemoryPct: "-", DiskUsed: "-", DiskTotal: "-", DiskPct: "-"}
 	if containers, err := listContainers(roleAdmin); err == nil {
 		stats.ContainersTotal = len(containers)
@@ -2255,6 +2276,8 @@ func handleAuthStatus(am *authManager) http.HandlerFunc {
 func main() {
 	port := flag.String("port", "", "port to listen on (default: 8080, env: PORT)")
 	auth := flag.String("auth", "", "enable auth: true/false (default: false, env: AUTH)")
+	viewerAuth := flag.String("viewer-auth", "", "enable viewer password (default: follows AUTH, env: VIEWER_AUTH)")
+	adminAuth := flag.String("admin-auth", "", "enable admin password (default: follows AUTH, env: ADMIN_AUTH)")
 	authRotate := flag.String("auth-rotate", "", "password rotation interval (default: 1h, env: AUTH_ROTATE)")
 	flag.Parse()
 
@@ -2275,6 +2298,24 @@ func main() {
 		authEnabled = true
 	}
 
+	// viewer/admin auth default to the master AUTH state; can be overridden independently
+	viewerAuthValue := os.Getenv("VIEWER_AUTH")
+	if *viewerAuth != "" {
+		viewerAuthValue = *viewerAuth
+	}
+	if viewerAuthValue == "" {
+		viewerAuthValue = authValue
+	}
+	adminAuthValue := os.Getenv("ADMIN_AUTH")
+	if *adminAuth != "" {
+		adminAuthValue = *adminAuth
+	}
+	if adminAuthValue == "" {
+		adminAuthValue = authValue
+	}
+	viewerAuthEnabled := viewerAuthValue == "true" || viewerAuthValue == "1"
+	adminAuthEnabled := adminAuthValue == "true" || adminAuthValue == "1"
+
 	rotateInterval := defaultRotate
 	rotateValue := os.Getenv("AUTH_ROTATE")
 	if *authRotate != "" {
@@ -2289,7 +2330,7 @@ func main() {
 		}
 	}
 
-	am := newAuthManager(authEnabled, rotateInterval)
+	am := newAuthManager(authEnabled, viewerAuthEnabled, adminAuthEnabled, rotateInterval)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {

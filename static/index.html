@@ -750,13 +750,21 @@ function authFetch(url,opts){
 
 function updateImagesTab(){
   var admin=(authRole==='admin'||!authEnabled)&&!mockMode;
+  // management tabs are admin-only; viewer only sees Containers
   document.getElementById('tabImages').style.display=admin?'':'none';
   document.getElementById('tabAudit').style.display=admin?'':'none';
   document.getElementById('tabCompose').style.display=admin?'':'none';
   document.getElementById('tabVolumes').style.display=admin?'':'none';
   document.getElementById('tabNetworks').style.display=admin?'':'none';
-  document.getElementById('statsBar').classList.toggle('show',admin);
-  if(admin)loadStats();
+  // stats bar is visible to all logged-in users (overview)
+  var loggedIn=!!authToken||!authEnabled;
+  document.getElementById('statsBar').classList.toggle('show',loggedIn&&!mockMode);
+  // write actions in stats bar are admin-only
+  var rulesBtn=document.querySelector('#statsBar button[onclick="showAlertRulesModal()"]');
+  var pruneBtn=document.querySelector('#statsBar button[onclick="systemPrune()"]');
+  if(rulesBtn)rulesBtn.style.display=admin?'':'none';
+  if(pruneBtn)pruneBtn.style.display=admin?'':'none';
+  if(loggedIn)loadStats();
 }
 
 function showLogin(){
@@ -838,8 +846,8 @@ function render(list){
   el.innerHTML=list.map(function(c){
     var active=c.id===activeId?' active':'';
     var actions='';
+    var buttons='<button class="mini-btn" onclick="showContainerInspect(\''+esc(c.id)+'\',event)">'+t('inspect')+'</button>';
     if(admin){
-      var buttons='<button class="mini-btn" onclick="showContainerInspect(\''+esc(c.id)+'\',event)">'+t('inspect')+'</button>';
       if(c.state==='running'){
         buttons+='<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'stop\',event)">'+t('stop')+'</button>'+
           '<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'restart\',event)">'+t('restart')+'</button>'+
@@ -852,6 +860,8 @@ function render(list){
           '<button class="mini-btn" onclick="containerAction(\''+esc(c.id)+'\',\'restart\',event)">'+t('restart')+'</button>';
       }
       buttons+='<button class="mini-btn danger" onclick="containerAction(\''+esc(c.id)+'\',\'remove\',event)">'+t('remove')+'</button>';
+      actions='<div class="item-actions">'+buttons+'</div>';
+    }else{
       actions='<div class="item-actions">'+buttons+'</div>';
     }
     return '<div class="item'+active+'" data-id="'+esc(c.id)+'" data-name="'+esc(c.name)+'">'+

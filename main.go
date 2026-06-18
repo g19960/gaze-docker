@@ -267,21 +267,39 @@ func tokenFromRequest(r *http.Request) string {
 	return r.Header.Get("X-Auth-Token")
 }
 
-// validComposePath validates a compose file path: must be a real .yml/.yaml file,
-// must not start with '-' (option injection), and must not be an absolute Windows drive path trick.
+// validComposePath validates a compose file path or a comma-separated list of them
+// (docker compose ls returns multiple -f files joined by comma). Each must end with
+// .yml/.yaml, not start with '-', and contain no control chars.
 func validComposePath(dir string) bool {
-	if dir == "" || len(dir) > 1024 || dir[0] == '-' {
+	if dir == "" || len(dir) > 4096 || dir[0] == '-' {
 		return false
 	}
-	// reject NUL bytes and control chars
 	for _, c := range dir {
 		if c < 0x20 {
 			return false
 		}
 	}
-	lower := strings.ToLower(dir)
-	if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
-		return false
+	for _, part := range strings.Split(dir, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || part[0] == '-' {
+			return false
+		}
+		lower := strings.ToLower(part)
+		if !strings.HasSuffix(lower, ".yml") && !strings.HasSuffix(lower, ".yaml") {
+			return false
+		}
+	}
+	return true
+}
+
+// composeFilesExist checks every file in a (comma-separated) compose path exists.
+func composeFilesExist(dir string) bool {
+	for _, part := range strings.Split(dir, ",") {
+		part = strings.TrimSpace(part)
+		info, err := os.Stat(part)
+		if err != nil || info.IsDir() {
+			return false
+		}
 	}
 	return true
 }
@@ -708,18 +726,24 @@ func handleComposeAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid compose path", http.StatusBadRequest)
 		return
 	}
-	if info, err := os.Stat(req.Dir); err != nil || info.IsDir() {
+	if !composeFilesExist(req.Dir) {
 		http.Error(w, "compose file not found", http.StatusBadRequest)
 		return
+	}
+	// build -f args (docker compose supports multiple -f flags)
+	var fArgs []string
+	for _, part := range strings.Split(req.Dir, ",") {
+		part = strings.TrimSpace(part)
+		fArgs = append(fArgs, "-f", part)
 	}
 	var args []string
 	switch req.Action {
 	case "up":
-		args = []string{"-f", req.Dir, "up", "-d"}
+		args = append(append(args, fArgs...), "up", "-d")
 	case "down":
-		args = []string{"-f", req.Dir, "down"}
+		args = append(append(args, fArgs...), "down")
 	case "restart":
-		args = []string{"-f", req.Dir, "restart"}
+		args = append(append(args, fArgs...), "restart")
 	default:
 		http.Error(w, "invalid action", http.StatusBadRequest)
 		return
@@ -748,18 +772,36 @@ func handleComposeFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid compose path", http.StatusBadRequest)
 		return
 	}
-	info, err := os.Stat(dir)
-	if err != nil || info.IsDir() {
+	if !composeFilesExist(dir) {
 		http.Error(w, "compose file not found", http.StatusBadRequest)
 		return
 	}
-	data, err := os.ReadFile(dir)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	// single file: read directly; multiple files: join with headers
+	parts := strings.Split(dir, ",")
+	var content string
+	if len(parts) == 1 {
+		data, err := os.ReadFile(strings.TrimSpace(parts[0]))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		content = string(data)
+	} else {
+		var b strings.Builder
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			data, err := os.ReadFile(p)
+			if err != nil {
+				continue
+			}
+			b.WriteString("# ===== " + p + " =====\n")
+			b.Write(data)
+			b.WriteString("\n")
+		}
+		content = b.String()
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]string{"content": string(data)})
+	_ = json.NewEncoder(w).Encode(map[string]string{"content": content})
 }
 
 // --- Volumes ---

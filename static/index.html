@@ -443,6 +443,16 @@ services:
   </div>
   <div class="perf-body" id="perfBody"></div>
 </div>
+<div class="modal-overlay" id="filePreviewModal">
+  <div class="modal" style="width:min(800px,94vw)">
+    <h2 id="filePreviewTitle">File</h2>
+    <pre class="inspect-pre" id="filePreviewPre" style="max-height:60vh">Loading...</pre>
+    <div class="modal-actions">
+      <button class="btn" onclick="copyToClipboard(document.getElementById('filePreviewPre').textContent);showToast('copied','ok')">copy</button>
+      <button class="btn" onclick="closeModal('filePreviewModal')">close</button>
+    </div>
+  </div>
+</div>
 <div class="modal-overlay" id="imageInspectModal">
   <div class="modal" style="width:min(900px,94vw)">
     <h2>Image Inspect</h2>
@@ -1325,6 +1335,16 @@ async function deleteImage(id,name){
 // Load image modal
 function showLoadModal(){document.getElementById('loadModal').classList.add('show');document.getElementById('loadProgress').style.display='none';document.getElementById('fileDropText').textContent=t('dropTar');}
 function closeModal(id){document.getElementById(id).classList.remove('show');}
+// click on overlay backdrop (not the modal content) closes it
+document.querySelectorAll('.modal-overlay').forEach(function(ov){
+  ov.addEventListener('click',function(e){if(e.target===ov)closeModal(ov.id);});
+});
+document.addEventListener('keydown',function(e){
+  if(e.key==='Escape'){
+    var open=document.querySelector('.modal-overlay.show');
+    if(open){closeModal(open.id);if(open.id==='execModal')closeExecModal();}
+  }
+});
 
 function onFileSelect(input){
   if(!input.files.length)return;
@@ -1648,11 +1668,24 @@ function cfmRender(files,id,path){
   var html='';
   if(!files.length){html='<div class="file-row"><span class="file-name" style="color:var(--text-muted)">(empty)</span></div>';}
   files.forEach(function(f){
-    var action=f.isDir?' onclick="cfmLoad(execContainerId,\''+esc(f.path).replace(/'/g,"\\'")+'\')"':'';
+    var safePath=esc(f.path).replace(/'/g,"\\'").replace(/&amp;/g,'&');
+    var action=f.isDir?(' onclick="cfmLoad(execContainerId,\''+safePath+'\')"'):(' onclick="showContainerFile(\''+safePath+'\')"');
     var icon=f.isDir?'▸':'•';
     html+='<div class="file-row"'+action+'><span class="file-icon">'+icon+'</span><span class="file-name">'+esc(f.name)+'</span></div>';
   });
   document.getElementById('cfmList').innerHTML=html;
+}
+async function showContainerFile(path){
+  document.getElementById('filePreviewModal').classList.add('show');
+  document.getElementById('filePreviewTitle').textContent=path.split('/').pop()||path;
+  document.getElementById('filePreviewPre').textContent=t('loading');
+  var url='/api/containers/file?id='+encodeURIComponent(execContainerId)+'&path='+encodeURIComponent(path);
+  if(authToken)url+='&token='+encodeURIComponent(authToken);
+  try{
+    var r=await fetch(url);
+    var d=await r.json()||{};
+    document.getElementById('filePreviewPre').textContent=d.error?('Error: '+d.error):(d.content||'(empty)');
+  }catch(e){document.getElementById('filePreviewPre').textContent='failed to load';}
 }
 function cfmUp(){
   var p=cfmPath.replace(/\/$/,'');

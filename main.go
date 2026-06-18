@@ -1876,6 +1876,56 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// handleContainerFile reads a single file's content from a running container via docker exec cat.
+func handleContainerFile(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	containerID := r.URL.Query().Get("id")
+	if !validID(containerID) {
+		http.Error(w, "invalid container id", http.StatusBadRequest)
+		return
+	}
+	allowed, err := hasAccessToContainer(roleFromRequest(r), containerID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	path := r.URL.Query().Get("path")
+	if path == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+	for _, c := range path {
+		if c < 0x20 {
+			http.Error(w, "invalid path", http.StatusBadRequest)
+			return
+		}
+	}
+	// size guard: refuse very large files (cat would stream everything into memory)
+	script := "if [ -f " + shellQuote(path) + " ]; then sz=$(wc -c < " + shellQuote(path) + " 2>/dev/null || echo 0); if [ \"$sz\" -gt 1048576 ]; then echo '__TOO_LARGE__'; else cat " + shellQuote(path) + "; fi; else echo '__NOTFILE__'; fi"
+	out, err := exec.Command("docker", "exec", containerID, "sh", "-c", script).Output()
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": strings.TrimSpace(string(out))})
+		return
+	}
+	res := string(out)
+	switch {
+	case strings.HasPrefix(res, "__TOO_LARGE__"):
+		_ = json.NewEncoder(w).Encode(map[string]string{"content": "", "error": "file too large (>1MB)"})
+	case strings.HasPrefix(res, "__NOTFILE__"):
+		_ = json.NewEncoder(w).Encode(map[string]string{"content": "", "error": "not a regular file"})
+	default:
+		_ = json.NewEncoder(w).Encode(map[string]string{"content": res})
+	}
+}
+
 func handleExec(w http.ResponseWriter, r *http.Request) {
 	if !requireAdmin(r) {
 		http.Error(w, "forbidden", http.StatusForbidden)
@@ -2163,6 +2213,7 @@ func main() {
 	mux.HandleFunc("/api/images/cleanup", handleImagesCleanup)
 	mux.HandleFunc("/api/exec", handleExec)
 	mux.HandleFunc("/api/containers/files", handleContainerFiles)
+	mux.HandleFunc("/api/containers/file", handleContainerFile)
 	mux.HandleFunc("/api/templates", handleTemplates)
 	mux.HandleFunc("/api/templates/delete", handleTemplateDelete)
 	mux.HandleFunc("/api/deploy/history", handleDeployHistory)

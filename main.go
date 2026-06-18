@@ -64,7 +64,6 @@ type session struct {
 }
 
 type authManager struct {
-	enabled    bool
 	viewerAuth bool
 	adminAuth  bool
 	interval   time.Duration
@@ -77,9 +76,8 @@ type authManager struct {
 	totalFailures int
 }
 
-func newAuthManager(enabled, viewerAuth, adminAuth bool, interval time.Duration) *authManager {
+func newAuthManager(viewerAuth, adminAuth bool, interval time.Duration) *authManager {
 	am := &authManager{
-		enabled:    enabled,
 		viewerAuth: viewerAuth,
 		adminAuth:  adminAuth,
 		interval:   interval,
@@ -87,7 +85,7 @@ func newAuthManager(enabled, viewerAuth, adminAuth bool, interval time.Duration)
 		fakeTokens: make(map[string]session),
 		failures:   make(map[string]int),
 	}
-	if enabled && (viewerAuth || adminAuth) {
+	if viewerAuth || adminAuth {
 		am.rotate()
 		go am.rotateLoop()
 	}
@@ -199,7 +197,7 @@ func (am *authManager) isFakeToken(token string) bool {
 }
 
 func (am *authManager) login(password string) (string, string, bool) {
-	if !am.enabled || (!am.viewerAuth && !am.adminAuth) {
+	if !am.viewerAuth && !am.adminAuth {
 		// auth fully off -> admin session
 		return "", roleAdmin, true
 	}
@@ -207,7 +205,7 @@ func (am *authManager) login(password string) (string, string, bool) {
 	defer am.mu.Unlock()
 
 	role := ""
-	// empty password matches any role whose auth is disabled (passwordless)
+	// empty password matches a role whose auth is disabled (passwordless)
 	if password == "" {
 		if !am.adminAuth {
 			role = roleAdmin
@@ -236,7 +234,7 @@ func (am *authManager) login(password string) (string, string, bool) {
 }
 
 func (am *authManager) sessionForToken(token string) (session, bool) {
-	if !am.enabled {
+	if !am.viewerAuth && !am.adminAuth {
 		return session{Role: roleAdmin, IssuedAt: time.Now()}, true
 	}
 	am.mu.RLock()
@@ -334,7 +332,7 @@ func composeFilesExist(dir string) bool {
 
 func (am *authManager) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !am.enabled {
+		if !am.viewerAuth && !am.adminAuth {
 			ctx := context.WithValue(r.Context(), roleContextKey, roleAdmin)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
@@ -2267,7 +2265,9 @@ func handleAuthStatus(am *authManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"auth_required": am.enabled,
+			"auth_required": am.viewerAuth || am.adminAuth,
+			"viewer_auth":   am.viewerAuth,
+			"admin_auth":    am.adminAuth,
 			"roles":         []string{roleViewer, roleAdmin},
 		})
 	}
@@ -2275,9 +2275,8 @@ func handleAuthStatus(am *authManager) http.HandlerFunc {
 
 func main() {
 	port := flag.String("port", "", "port to listen on (default: 8080, env: PORT)")
-	auth := flag.String("auth", "", "enable auth: true/false (default: false, env: AUTH)")
-	viewerAuth := flag.String("viewer-auth", "", "enable viewer password (default: follows AUTH, env: VIEWER_AUTH)")
-	adminAuth := flag.String("admin-auth", "", "enable admin password (default: follows AUTH, env: ADMIN_AUTH)")
+	viewerAuth := flag.String("viewer-auth", "", "enable viewer password (default: false, env: VIEWER_AUTH)")
+	adminAuth := flag.String("admin-auth", "", "enable admin password (default: false, env: ADMIN_AUTH)")
 	authRotate := flag.String("auth-rotate", "", "password rotation interval (default: 1h, env: AUTH_ROTATE)")
 	flag.Parse()
 
@@ -2289,29 +2288,22 @@ func main() {
 		listenPort = *port
 	}
 
-	authEnabled := false
-	authValue := os.Getenv("AUTH")
-	if *auth != "" {
-		authValue = *auth
-	}
-	if authValue == "true" || authValue == "1" {
-		authEnabled = true
-	}
-
-	// viewer/admin auth default to the master AUTH state; can be overridden independently
+	// backward compat: legacy AUTH=true enables both viewer and admin
 	viewerAuthValue := os.Getenv("VIEWER_AUTH")
 	if *viewerAuth != "" {
 		viewerAuthValue = *viewerAuth
-	}
-	if viewerAuthValue == "" {
-		viewerAuthValue = authValue
 	}
 	adminAuthValue := os.Getenv("ADMIN_AUTH")
 	if *adminAuth != "" {
 		adminAuthValue = *adminAuth
 	}
-	if adminAuthValue == "" {
-		adminAuthValue = authValue
+	if legacy := os.Getenv("AUTH"); legacy == "true" || legacy == "1" {
+		if viewerAuthValue == "" {
+			viewerAuthValue = "true"
+		}
+		if adminAuthValue == "" {
+			adminAuthValue = "true"
+		}
 	}
 	viewerAuthEnabled := viewerAuthValue == "true" || viewerAuthValue == "1"
 	adminAuthEnabled := adminAuthValue == "true" || adminAuthValue == "1"
@@ -2330,7 +2322,7 @@ func main() {
 		}
 	}
 
-	am := newAuthManager(authEnabled, viewerAuthEnabled, adminAuthEnabled, rotateInterval)
+	am := newAuthManager(viewerAuthEnabled, adminAuthEnabled, rotateInterval)
 
 	staticFS, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -2380,8 +2372,8 @@ func main() {
 
 	addr := ":" + listenPort
 	log.Printf("[BUILD] version=%s commit=%s built_at=%s go=%s platform=%s/%s", buildVersion, buildCommit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH)
-	if authEnabled {
-		log.Printf("Gaze Docker running at http://localhost%s (auth ON)", addr)
+	if viewerAuthEnabled || adminAuthEnabled {
+		log.Printf("Gaze Docker running at http://localhost%s (viewer auth: %v, admin auth: %v)", addr, viewerAuthEnabled, adminAuthEnabled)
 	} else {
 		log.Printf("Gaze Docker running at http://localhost%s (auth OFF)", addr)
 	}

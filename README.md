@@ -51,9 +51,8 @@ docker run -d -p 8080:8080 -v /var/run/docker.sock:/var/run/docker.sock gaze-doc
 | 参数 | 环境变量 | 默认值 | 说明 |
 |------|---------|--------|------|
 | `-port` | `PORT` | `8080` | Web 服务监听端口 |
-| `-auth` | `AUTH` | `false` | 启用认证总开关（`true`/`1`） |
-| `-viewer-auth` | `VIEWER_AUTH` | 跟随 AUTH | 启用 viewer 密码（只读角色） |
-| `-admin-auth` | `ADMIN_AUTH` | 跟随 AUTH | 启用 admin 密码（完整管理） |
+| `-viewer-auth` | `VIEWER_AUTH` | `false` | 启用 viewer 密码（只读角色） |
+| `-admin-auth` | `ADMIN_AUTH` | `false` | 启用 admin 密码（完整管理） |
 | `-auth-rotate` | `AUTH_ROTATE` | `1h` | 密码轮换周期（仅轮换已启用的身份） |
 
 **权限模型**：viewer 只能查看（容器列表、日志、容器详情、性能监控），所有写操作（启停容器、镜像管理、部署、卷/网络、exec、清理等）仅 admin。view/admin 认证可独立开关，密码轮换跟随各自开关。
@@ -149,9 +148,8 @@ docker run -d -p 8080:8080 -v /var/run/docker.sock:/var/run/docker.sock gaze-doc
 | Flag | Env | Default | Description |
 |------|-----|---------|-------------|
 | `-port` | `PORT` | `8080` | Web server listening port |
-| `-auth` | `AUTH` | `false` | Master auth switch (`true`/`1`) |
-| `-viewer-auth` | `VIEWER_AUTH` | follows AUTH | Enable viewer password (read-only role) |
-| `-admin-auth` | `ADMIN_AUTH` | follows AUTH | Enable admin password (full management) |
+| `-viewer-auth` | `VIEWER_AUTH` | `false` | Enable viewer password (read-only role) |
+| `-admin-auth` | `ADMIN_AUTH` | `false` | Enable admin password (full management) |
 | `-auth-rotate` | `AUTH_ROTATE` | `1h` | Password rotation interval (only enabled roles are rotated) |
 
 **Permissions**: viewer is read-only (container list, logs, inspect, perf monitoring). All write operations (start/stop containers, image management, deploy, volumes/networks, exec, prune) are admin-only. viewer/admin auth can be toggled independently; rotation follows each role's switch.

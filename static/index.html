@@ -546,7 +546,7 @@ var logPaused=false,levelFilter='all',notifyEnabled=false;
 var authToken=sessionStorage.getItem('token')||'';
 var authRole=sessionStorage.getItem('role')||'';
 var mockMode=sessionStorage.getItem('mockMode')==='true';
-var authEnabled=false;
+var authEnabled=false,viewerAuthOn=false,adminAuthOn=false;
 var sseSource=null;
 var sidebarCollapsed=window.innerWidth<=900;
 var filterQuery='';
@@ -710,7 +710,8 @@ function updateRolePill(){
 
 async function doLogin(){
   var pwd=document.getElementById('loginPwd').value;
-  if(!pwd)return;
+  // password required only if some role has auth enabled; empty password logs into a passwordless role
+  if(!pwd&&viewerAuthOn&&adminAuthOn)return;
   try{
     var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
     var d=await r.json();
@@ -785,6 +786,8 @@ async function checkAuth(){
     var r=await fetch('/api/auth-status');
     var d=await r.json();
     authEnabled=d.auth_required;
+    viewerAuthOn=!!d.viewer_auth;
+    adminAuthOn=!!d.admin_auth;
     if(!authEnabled){loadContainers();startSSE();startEvents();updateImagesTab();return;}
     if(authToken){
       var t=await fetch('/api/containers',{headers:{'X-Auth-Token':authToken}});

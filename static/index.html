@@ -178,7 +178,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
 .template-card-name{font-weight:500;color:var(--cyan);margin-bottom:6px}
 .json-toggle{color:var(--yellow);cursor:pointer;font-size:10px;margin-right:6px}
 .copy-btn{padding:1px 5px;font-size:9px}
-.perf-panel{position:fixed;left:0;top:60px;bottom:0;width:300px;background:var(--bg2);border-right:1px solid var(--border);z-index:95;display:none;flex-direction:column;box-shadow:4px 0 20px rgba(0,0,0,.2)}
+.perf-panel{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:340px;max-width:94vw;background:var(--bg2);border:1px solid var(--border);border-radius:8px;z-index:100;display:none;flex-direction:column;box-shadow:0 8px 30px rgba(0,0,0,.3)}
 .perf-panel.show{display:flex}
 .perf-hdr{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.1em}
 .perf-body{flex:1;overflow-y:auto;padding:12px}
@@ -234,6 +234,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
   <h1>Gaze Docker</h1>
   <div class="header-meta">
     <span class="role-pill" id="rolePill" style="display:none"></span>
+    <button class="btn" id="btnAdminLogin" onclick="showAdminLogin()" style="display:none;border-color:var(--green);color:var(--green)">admin login</button>
     <button class="btn" id="btnLang" onclick="toggleLang()">中文</button>
     <button class="btn" id="btnTheme" onclick="toggleTheme()">&#9790; dark</button>
     <div class="dot" id="sseDot"></div>
@@ -660,6 +661,7 @@ function applyLang(){
   var nt=document.querySelector('#networkInspectModal h2');if(nt)nt.textContent=t('inspect');
   var et=document.getElementById('execTitle');if(et){var suffix=et.textContent.split(':').slice(1).join(':');et.textContent=t('execTerminal')+(suffix?':'+suffix:'');}
   document.getElementById('lc').textContent=lineCount+' '+t('lines');
+  updateAdminLoginBtn();
   if(document.getElementById('auditPanel').classList.contains('show'))loadAudit();
 }
 function toggleLang(){lang=lang==='zh'?'en':'zh';localStorage.setItem('lang',lang);applyLang();renderFiltered();}
@@ -708,10 +710,7 @@ function updateRolePill(){
   pill.textContent=authRole;
 }
 
-async function doLogin(){
-  var pwd=document.getElementById('loginPwd').value;
-  // password required only if some role has auth enabled; empty password logs into a passwordless role
-  if(!pwd&&viewerAuthOn&&adminAuthOn)return;
+async function loginAs(pwd){
   try{
     var r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pwd})});
     var d=await r.json();
@@ -724,19 +723,41 @@ async function doLogin(){
         sessionStorage.setItem('mockMode','true');
         document.getElementById('loginOverlay').style.display='none';
         startMockMode();
-        return;
+        return true;
       }
       mockMode=false;
       sessionStorage.removeItem('mockMode');
       document.getElementById('loginOverlay').style.display='none';
       document.getElementById('loginErr').textContent='';
       document.getElementById('loginPwd').value='';
-      updateRolePill();updateImagesTab();
+      updateRolePill();updateImagesTab();updateAdminLoginBtn();
       loadContainers();startSSE();startEvents();
-    }else{
-      document.getElementById('loginErr').textContent=d.error||t('wrongPassword');
+      return true;
     }
-  }catch(e){document.getElementById('loginErr').textContent=t('connectionError');}
+  }catch(e){}
+  return false;
+}
+async function doLogin(){
+  var pwd=document.getElementById('loginPwd').value;
+  if(!pwd&&viewerAuthOn&&adminAuthOn)return;
+  var ok=await loginAs(pwd);
+  if(!ok){document.getElementById('loginErr').textContent=t('wrongPassword');}
+}
+
+// Show "admin login" button when admin auth is on and current session is not admin
+function updateAdminLoginBtn(){
+  var btn=document.getElementById('btnAdminLogin');
+  if(!btn)return;
+  var show=adminAuthOn&&authRole!=='admin'&&!mockMode;
+  btn.style.display=show?'':'none';
+  btn.textContent=lang==='zh'?'管理员登录':'admin login';
+}
+function showAdminLogin(){
+  // reuse the login overlay but label it for admin
+  var box=document.querySelector('#loginOverlay .login-box h2');
+  if(box)box.textContent=lang==='zh'?'管理员登录':'Admin Login';
+  document.getElementById('loginOverlay').style.display='flex';
+  document.getElementById('loginPwd').focus();
 }
 
 function authFetch(url,opts){
@@ -770,12 +791,14 @@ function updateImagesTab(){
 
 function showLogin(){
   authToken='';authRole='';sessionStorage.removeItem('token');sessionStorage.removeItem('role');
+  var box=document.querySelector('#loginOverlay .login-box h2');
+  if(box)box.textContent='Gaze Docker';
   closeWS();
   if(sseSource){sseSource.close();sseSource=null;}
   if(sseRebuildTimer){clearTimeout(sseRebuildTimer);sseRebuildTimer=null;}
   if(eventSource){eventSource.close();eventSource=null;}
   if(eventRebuildTimer){clearTimeout(eventRebuildTimer);eventRebuildTimer=null;}
-  updateRolePill();updateImagesTab();
+  updateRolePill();updateImagesTab();updateAdminLoginBtn();
   document.getElementById('loginOverlay').style.display='flex';
   document.getElementById('loginPwd').focus();
 }
@@ -788,11 +811,15 @@ async function checkAuth(){
     authEnabled=d.auth_required;
     viewerAuthOn=!!d.viewer_auth;
     adminAuthOn=!!d.admin_auth;
+    updateAdminLoginBtn();
     if(!authEnabled){loadContainers();startSSE();startEvents();updateImagesTab();return;}
     if(authToken){
       var t=await fetch('/api/containers',{headers:{'X-Auth-Token':authToken}});
       if(t.status===401){showLogin();return;}
       loadContainers();startSSE();startEvents();updateImagesTab();
+    }else if(!viewerAuthOn&&adminAuthOn){
+      // admin-only auth: enter as anonymous viewer (passwordless), show admin login button
+      await loginAs('');
     }else{showLogin();}
   }catch(e){loadContainers();startSSE();startEvents();updateImagesTab();}
 }

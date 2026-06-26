@@ -1000,11 +1000,31 @@ function closeWS(){
   setWS('disconnected');
 }
 
+var MAX_LOG_LINES=2000;
+var logBuffer=[],flushScheduled=false;
 function appendLine(raw,prepend){
   if(logPaused&&!prepend)return;
-  var out=document.getElementById('out');
+  if(prepend){
+    // history prepend: insert immediately one-by-one (low frequency)
+    flushOne(raw,true);
+    return;
+  }
+  // buffer streaming lines; flush in a single rAF to batch DOM writes
+  logBuffer.push(raw);
   lineCount++;
-  document.getElementById('lc').textContent=lineCount+' '+t('lines');
+  if(!flushScheduled){
+    flushScheduled=true;
+    requestAnimationFrame(flushBuffer);
+  }
+  // alerts/notify on the raw line (cheap, no DOM)
+  var m=raw.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+([\s\S]*)$/);
+  var msg=m?m[1]:raw;
+  var cls=classify(msg);
+  if(cls==='err'){checkNotifyPermission();maybeNotify(activeName||'',msg);}
+  matchAlertRules(activeName||'',msg);
+}
+function flushOne(raw,prepend){
+  var out=document.getElementById('out');
   var m=raw.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+([\s\S]*)$/);
   var ts='',msg=raw;
   if(m){ts=formatTimestamp(m[1]);msg=m[2];}
@@ -1021,10 +1041,38 @@ function appendLine(raw,prepend){
   d.innerHTML='<span class="ts">'+esc(ts)+'</span><span class="msg '+cls+'">'+esc(displayMsg)+'</span>';
   applyFilterToLine(d);
   if(prepend){out.insertBefore(d,out.firstChild);}else{out.appendChild(d);}
-  if(!prepend&&autoScroll)requestAnimationFrame(function(){out.scrollTop=out.scrollHeight;});
-  // notification on error
-  if(cls==='err'&&!prepend){checkNotifyPermission();maybeNotify(activeName||'',msg);}
-  if(!prepend){matchAlertRules(activeName||'',msg);}
+}
+function flushBuffer(){
+  flushScheduled=false;
+  var out=document.getElementById('out');
+  var frag=document.createDocumentFragment();
+  for(var i=0;i<logBuffer.length;i++){
+    var raw=logBuffer[i];
+    var m=raw.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+([\s\S]*)$/);
+    var ts='',msg=raw;
+    if(m){ts=formatTimestamp(m[1]);msg=m[2];}
+    var cls=classify(msg);
+    var d=document.createElement('div');
+    d.className='line';
+    d.setAttribute('data-raw',raw);
+    d.setAttribute('data-level',cls);
+    var displayMsg=msg;
+    var trimmed=msg.trim();
+    if((trimmed.charAt(0)==='{'||trimmed.charAt(0)==='[')&&trimmed.length>2){
+      try{var parsed=JSON.parse(trimmed);displayMsg=JSON.stringify(parsed);}catch(e){}
+    }
+    d.innerHTML='<span class="ts">'+esc(ts)+'</span><span class="msg '+cls+'">'+esc(displayMsg)+'</span>';
+    applyFilterToLine(d);
+    frag.appendChild(d);
+  }
+  logBuffer=[];
+  out.appendChild(frag);
+  // cap DOM size: drop oldest lines beyond the limit
+  var drop=out.childElementCount-MAX_LOG_LINES;
+  while(drop-->0){out.removeChild(out.firstChild);}
+  // update count + scroll once per frame (not per line)
+  document.getElementById('lc').textContent=lineCount+' '+t('lines');
+  if(autoScroll)out.scrollTop=out.scrollHeight;
 }
 
 function formatTimestamp(utcTs){

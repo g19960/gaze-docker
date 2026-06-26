@@ -300,7 +300,11 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
         </div>
         <button class="btn" id="btnPause" onclick="togglePause()">pause</button>
         <button class="btn on" id="btnAS" onclick="toggleAS()">autoscroll</button>
-        <button class="btn" id="btnLoadMore" onclick="loadMoreHistory()" style="display:none">load more</button>
+        <span style="display:inline-flex;align-items:center;gap:4px;font-size:10px;color:var(--text-dim)">
+          <span id="keepLbl">keep</span>
+          <input type="number" id="keepLines" min="100" max="20000" step="100" value="2000" style="width:70px;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;padding:3px 6px;color:var(--text);font-family:inherit;font-size:11px" onchange="setKeepLines(this.value)" onkeydown="if(event.key==='Enter')this.blur()">
+          <span id="linesLbl">lines</span>
+        </span>
         <button class="btn" onclick="downloadLog()">download</button>
         <button class="btn" onclick="clearLog()">clear</button>
       </div>
@@ -545,7 +549,8 @@ services:
 <div class="event-rail" id="eventRail"></div>
 <script>
 var ws=null,activeId=null,autoScroll=true,lineCount=0,containers=[];
-var logFilterQuery='',logFilterRegex=false,historyTail=500,historyLoading=false;
+var logFilterQuery='',logFilterRegex=false;
+var keepLines=parseInt(localStorage.getItem('keepLines'))||2000;
 var logPaused=false,levelFilter='all',notifyEnabled=false;
 var authToken=sessionStorage.getItem('token')||'';
 var authRole=sessionStorage.getItem('role')||'';
@@ -580,8 +585,8 @@ var mockLogs=[
 ];
 var lang=localStorage.getItem('lang')||'zh';
 var I18N={
-  zh:{containers:'容器',images:'镜像',audit:'审计',hide:'隐藏',dark:'深色',light:'浅色',password:'密码',login:'登录',filterContainers:'过滤容器...',filterLogs:'过滤日志...',loading:'加载中...',noContainers:'未找到容器',selectContainer:'选择容器查看日志',lines:'行',autoscroll:'自动滚动',loadMore:'加载更多',download:'下载',clear:'清空',loadImage:'导入镜像',deploy:'部署',refresh:'刷新',repository:'仓库',tag:'标签',size:'大小',created:'创建时间',time:'时间',role:'角色',remote:'来源',action:'操作',target:'目标',result:'结果',output:'输出',success:'成功',failed:'失败',noAudit:'暂无审计记录',dropTar:'拖拽 .tar 文件到这里，或点击选择',uploading:'上传中...',cancel:'取消',imageLabel:'镜像（如果提供 compose，可选）',composeLabel:'Docker Compose YAML',uploadCompose:'或上传 compose 文件',deploying:'部署中...',imageFiles:'镜像文件',close:'关闭',adminRequired:'需要 admin 权限',noImages:'未找到镜像',delete:'删除',browse:'浏览',emptyDir:'空目录',imageDeleted:'镜像已删除',deleteFailed:'删除失败',imageLoaded:'镜像已导入',loadFailed:'导入失败',uploadFailed:'上传失败',deployed:'部署成功',deployFailed:'部署失败',provideDeploy:'请填写镜像或 compose YAML',wrongPassword:'密码错误',connectionError:'连接错误',inspect:'详情',start:'启动',stop:'停止',restart:'重启',remove:'删除',containerInspect:'容器详情',performance:'性能监控',up:'上级',copied:'已复制',copy:'复制',cleanup:'清理建议',addRule:'添加规则',deleteSelected:'删除选中',save:'保存',empty:'(空)',failed2:'失败',all:'全部',confirmRemoveContainer:'确认删除容器？',operationFailed:'操作失败',operationDone:'操作成功',compose:'Compose',volumes:'卷',networks:'网络',templates:'模板',inspect:'详情',execTerminal:'终端',pause:'暂停',resume:'继续',pruneUnused:'清理未使用',noCompose:'暂无 Compose 项目',noVolumes:'暂无卷',noNetworks:'暂无网络',confirmPrune:'确认清理所有未使用的卷？',enableNotify:'检测到错误日志，是否开启桌面通知？',rules:'规则',prune:'清理',alertRules:'告警规则',events:'事件'},
-  en:{containers:'Containers',images:'Images',audit:'Audit',hide:'hide',dark:'dark',light:'light',password:'password',login:'login',filterContainers:'filter containers...',filterLogs:'filter logs...',loading:'Loading...',noContainers:'No containers found',selectContainer:'Select a container to view logs',lines:'lines',autoscroll:'autoscroll',loadMore:'load more',download:'download',clear:'clear',loadImage:'load image',deploy:'deploy',refresh:'refresh',repository:'Repository',tag:'Tag',size:'Size',created:'Created',time:'Time',role:'Role',remote:'Remote',action:'Action',target:'Target',result:'Result',output:'Output',success:'Success',failed:'Failed',noAudit:'No audit records',dropTar:'Drop .tar file here or click to browse',uploading:'Uploading...',cancel:'cancel',imageLabel:'Image (optional if compose provided)',composeLabel:'Docker Compose YAML',uploadCompose:'Or upload a compose file',deploying:'Deploying...',imageFiles:'Image Files',close:'close',adminRequired:'Admin access required',noImages:'No images found',delete:'delete',browse:'browse',emptyDir:'Empty directory',imageDeleted:'Image deleted',deleteFailed:'Delete failed',imageLoaded:'Image loaded',loadFailed:'Load failed',uploadFailed:'Upload failed',deployed:'Deployed',deployFailed:'Deploy failed',provideDeploy:'Provide an image or compose YAML',wrongPassword:'wrong password',connectionError:'connection error',inspect:'inspect',start:'start',stop:'stop',restart:'restart',remove:'remove',containerInspect:'Container Inspect',performance:'performance',up:'up',copied:'copied',copy:'copy',cleanup:'cleanup',addRule:'add rule',deleteSelected:'delete selected',save:'save',empty:'(empty)',failed2:'failed',all:'all',confirmRemoveContainer:'Remove container?',operationFailed:'Operation failed',operationDone:'Operation done',compose:'Compose',volumes:'Volumes',networks:'Networks',templates:'Templates',inspect:'inspect',execTerminal:'Terminal',pause:'pause',resume:'resume',pruneUnused:'prune unused',noCompose:'No compose projects',noVolumes:'No volumes',noNetworks:'No networks',confirmPrune:'Prune all unused volumes?',enableNotify:'Error detected, enable desktop notifications?',rules:'rules',prune:'prune',alertRules:'Alert Rules',events:'Events'}
+  zh:{containers:'容器',images:'镜像',audit:'审计',hide:'隐藏',dark:'深色',light:'浅色',password:'密码',login:'登录',filterContainers:'过滤容器...',filterLogs:'过滤日志...',loading:'加载中...',noContainers:'未找到容器',selectContainer:'选择容器查看日志',lines:'行',autoscroll:'自动滚动',loadMore:'加载更多',download:'下载',clear:'清空',loadImage:'导入镜像',deploy:'部署',refresh:'刷新',repository:'仓库',tag:'标签',size:'大小',created:'创建时间',time:'时间',role:'角色',remote:'来源',action:'操作',target:'目标',result:'结果',output:'输出',success:'成功',failed:'失败',noAudit:'暂无审计记录',dropTar:'拖拽 .tar 文件到这里，或点击选择',uploading:'上传中...',cancel:'取消',imageLabel:'镜像（如果提供 compose，可选）',composeLabel:'Docker Compose YAML',uploadCompose:'或上传 compose 文件',deploying:'部署中...',imageFiles:'镜像文件',close:'关闭',adminRequired:'需要 admin 权限',noImages:'未找到镜像',delete:'删除',browse:'浏览',emptyDir:'空目录',imageDeleted:'镜像已删除',deleteFailed:'删除失败',imageLoaded:'镜像已导入',loadFailed:'导入失败',uploadFailed:'上传失败',deployed:'部署成功',deployFailed:'部署失败',provideDeploy:'请填写镜像或 compose YAML',wrongPassword:'密码错误',connectionError:'连接错误',inspect:'详情',start:'启动',stop:'停止',restart:'重启',remove:'删除',containerInspect:'容器详情',performance:'性能监控',up:'上级',copied:'已复制',copy:'复制',cleanup:'清理建议',addRule:'添加规则',deleteSelected:'删除选中',save:'保存',empty:'(空)',failed2:'失败',all:'全部',keep:'保留',confirmRemoveContainer:'确认删除容器？',operationFailed:'操作失败',operationDone:'操作成功',compose:'Compose',volumes:'卷',networks:'网络',templates:'模板',inspect:'详情',execTerminal:'终端',pause:'暂停',resume:'继续',pruneUnused:'清理未使用',noCompose:'暂无 Compose 项目',noVolumes:'暂无卷',noNetworks:'暂无网络',confirmPrune:'确认清理所有未使用的卷？',enableNotify:'检测到错误日志，是否开启桌面通知？',rules:'规则',prune:'清理',alertRules:'告警规则',events:'事件'},
+  en:{containers:'Containers',images:'Images',audit:'Audit',hide:'hide',dark:'dark',light:'light',password:'password',login:'login',filterContainers:'filter containers...',filterLogs:'filter logs...',loading:'Loading...',noContainers:'No containers found',selectContainer:'Select a container to view logs',lines:'lines',autoscroll:'autoscroll',loadMore:'load more',download:'download',clear:'clear',loadImage:'load image',deploy:'deploy',refresh:'refresh',repository:'Repository',tag:'Tag',size:'Size',created:'Created',time:'Time',role:'Role',remote:'Remote',action:'Action',target:'Target',result:'Result',output:'Output',success:'Success',failed:'Failed',noAudit:'No audit records',dropTar:'Drop .tar file here or click to browse',uploading:'Uploading...',cancel:'cancel',imageLabel:'Image (optional if compose provided)',composeLabel:'Docker Compose YAML',uploadCompose:'Or upload a compose file',deploying:'Deploying...',imageFiles:'Image Files',close:'close',adminRequired:'Admin access required',noImages:'No images found',delete:'delete',browse:'browse',emptyDir:'Empty directory',imageDeleted:'Image deleted',deleteFailed:'Delete failed',imageLoaded:'Image loaded',loadFailed:'Load failed',uploadFailed:'Upload failed',deployed:'Deployed',deployFailed:'Deploy failed',provideDeploy:'Provide an image or compose YAML',wrongPassword:'wrong password',connectionError:'connection error',inspect:'inspect',start:'start',stop:'stop',restart:'restart',remove:'remove',containerInspect:'Container Inspect',performance:'performance',up:'up',copied:'copied',copy:'copy',cleanup:'cleanup',addRule:'add rule',deleteSelected:'delete selected',save:'save',empty:'(empty)',failed2:'failed',all:'all',keep:'keep',confirmRemoveContainer:'Remove container?',operationFailed:'Operation failed',operationDone:'Operation done',compose:'Compose',volumes:'Volumes',networks:'Networks',templates:'Templates',inspect:'inspect',execTerminal:'Terminal',pause:'pause',resume:'resume',pruneUnused:'prune unused',noCompose:'No compose projects',noVolumes:'No volumes',noNetworks:'No networks',confirmPrune:'Prune all unused volumes?',enableNotify:'Error detected, enable desktop notifications?',rules:'rules',prune:'prune',alertRules:'Alert Rules',events:'Events'}
 };
 
 function t(k){return (I18N[lang]&&I18N[lang][k])||I18N.en[k]||k;}
@@ -611,7 +616,8 @@ function applyLang(){
   setPlaceholder('logFilter','filterLogs');
   document.getElementById('btnAS').textContent=t('autoscroll');
   var btnPause=document.getElementById('btnPause');if(btnPause)btnPause.textContent=logPaused?t('resume'):t('pause');
-  document.getElementById('btnLoadMore').textContent=t('loadMore');
+  var keepLbl=document.getElementById('keepLbl');if(keepLbl)keepLbl.textContent=t('keep');
+  var linesLbl=document.getElementById('linesLbl');if(linesLbl)linesLbl.textContent=t('lines');
   document.querySelector('button[onclick="downloadLog()"]').textContent=t('download');
   document.querySelector('button[onclick="clearLog()"]').textContent=t('clear');
   document.querySelector('.empty-txt').textContent=t('selectContainer');
@@ -948,7 +954,6 @@ function selectC(id,name){
   logFilterQuery='';document.getElementById('logFilter').value='';document.getElementById('matchCount').textContent='';
   logFilterRegex=false;document.getElementById('btnRegex').classList.remove('on');
   clearLog();connectWS(id);
-  loadMoreHistory();
 }
 
 function syncActiveSelection(){
@@ -1000,7 +1005,6 @@ function closeWS(){
   setWS('disconnected');
 }
 
-var MAX_LOG_LINES=2000;
 var logBuffer=[],flushScheduled=false;
 function appendLine(raw,prepend){
   if(logPaused&&!prepend)return;
@@ -1067,8 +1071,8 @@ function flushBuffer(){
   }
   logBuffer=[];
   out.appendChild(frag);
-  // cap DOM size: drop oldest lines beyond the limit
-  var drop=out.childElementCount-MAX_LOG_LINES;
+  // cap DOM size: drop oldest lines beyond the keep limit
+  var drop=out.childElementCount-keepLines;
   while(drop-->0){out.removeChild(out.firstChild);}
   // update count + scroll once per frame (not per line)
   document.getElementById('lc').textContent=lineCount+' '+t('lines');
@@ -1090,7 +1094,19 @@ function classify(m){
 }
 
 function setWS(s){var e=document.getElementById('wsStatus');e.className='ws '+s;e.textContent=s;}
-function clearLog(){document.getElementById('out').innerHTML='';lineCount=0;document.getElementById('lc').textContent='0 lines';historyTail=500;document.getElementById('btnLoadMore').style.display='';}
+function clearLog(){document.getElementById('out').innerHTML='';lineCount=0;document.getElementById('lc').textContent='0 lines';}
+function setKeepLines(v){
+  var n=parseInt(v);
+  if(isNaN(n)||n<100)n=100;
+  if(n>20000)n=20000;
+  keepLines=n;
+  localStorage.setItem('keepLines',String(n));
+  document.getElementById('keepLines').value=n;
+  // immediately prune if currently over the new limit
+  var out=document.getElementById('out');
+  var drop=out.childElementCount-keepLines;
+  while(drop-->0){out.removeChild(out.firstChild);}
+}
 
 function applyFilterToLine(el){
   var raw=el.getAttribute('data-raw')||'';
@@ -1135,30 +1151,7 @@ function toggleRegex(){
   applyLogFilter();
 }
 
-async function loadMoreHistory(){
-  if(mockMode)return;
-  if(!activeId||historyLoading)return;
-  if(historyTail>5000)return;
-  historyLoading=true;
-  var btn=document.getElementById('btnLoadMore');
-  btn.textContent='loading...';
-  try{
-    var url='/api/logs/history?id='+encodeURIComponent(activeId)+'&tail='+historyTail;
-    if(authToken)url+='&token='+encodeURIComponent(authToken);
-    var r=await fetch(url);
-    if(!r.ok)throw new Error('failed');
-    var lines=await r.json();
-    var out=document.getElementById('out');
-    var existing=new Set();
-    for(var i=0;i<out.children.length;i++){existing.add(out.children[i].getAttribute('data-raw'));}
-    for(var j=lines.length-1;j>=0;j--){
-      if(!existing.has(lines[j])){appendLine(lines[j],true);}
-    }
-    historyTail=Math.min(historyTail*2,5000);
-  if(historyTail>5000){btn.style.display='none';}else{btn.textContent=t('loadMore')+' ('+historyTail+')';}
-  }catch(e){btn.textContent=t('loadMore');}
-  historyLoading=false;
-}
+async function loadMoreHistory(){/* removed: replaced by keep-lines setting */}
 
 function downloadLog(){
   var lines=document.querySelectorAll('#out .line:not(.hidden)');
@@ -2188,6 +2181,7 @@ function renderFiles(path,files){
 applyLang();
 checkAuth();
 loadAlertRules();
+document.getElementById('keepLines').value=keepLines;
 </script>
 </body>
 </html>

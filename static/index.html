@@ -965,7 +965,6 @@ function syncActiveSelection(){
 var wsReconnectTimer=null,wsReconnectDelay=1000,wsEpoch=0;
 function connectWS(id){
   if(wsReconnectTimer){clearTimeout(wsReconnectTimer);wsReconnectTimer=null;}
-  // fresh delay on each new (re)connect attempt
   var myEpoch=++wsEpoch;
   if(ws){ws._userClosed=true;ws.close();ws=null;}
   setWS('connecting');
@@ -973,16 +972,30 @@ function connectWS(id){
   var url=proto+'://'+location.host+'/api/logs?id='+id;
   if(authToken)url+='&token='+encodeURIComponent(authToken);
   try{ws=new WebSocket(url);}catch(e){scheduleReconnect(id,myEpoch);return;}
-  ws.onopen=function(){wsReconnectDelay=1000;setWS('connected');};
-  ws.onmessage=function(e){appendLine(e.data);};
+  ws._opened=false;ws._gotData=false;
+  ws.onopen=function(){ws._opened=true;wsReconnectDelay=1000;setWS('connected');};
+  ws.onmessage=function(e){ws._gotData=true;appendLine(e.data);};
   ws.onclose=function(){
-    // only reconnect if this socket is still current and wasn't intentionally closed
     if(this._userClosed){setWS('disconnected');return;}
     if(myEpoch!==wsEpoch){return;}
+    // never opened = handshake rejected (likely auth token expired) -> don't reconnect loop; re-auth
+    if(!this._opened){
+      setWS('disconnected');
+      handleSessionLost();
+      return;
+    }
     setWS('reconnecting');
     scheduleReconnect(id,myEpoch);
   };
   ws.onerror=function(){};
+}
+// session lost (token expired/invalid): clear token and re-enter per current auth config
+function handleSessionLost(){
+  authToken='';authRole='';
+  sessionStorage.removeItem('token');sessionStorage.removeItem('role');
+  updateRolePill();updateImagesTab();updateAdminLoginBtn();
+  // re-check auth: will re-enter as anonymous viewer if viewer passwordless, else show login
+  checkAuth();
 }
 function scheduleReconnect(id,myEpoch){
   if(wsReconnectTimer)clearTimeout(wsReconnectTimer);

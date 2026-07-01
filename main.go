@@ -230,6 +230,15 @@ func (am *authManager) login(password string) (string, string, bool) {
 
 	token := randomHex(16)
 	am.tokens[token] = session{Role: role, IssuedAt: time.Now()}
+	// prune: drop expired tokens (older than rotation interval) and cap total size
+	now := time.Now()
+	if len(am.tokens) > 512 {
+		for k, s := range am.tokens {
+			if now.Sub(s.IssuedAt) > am.interval {
+				delete(am.tokens, k)
+			}
+		}
+	}
 	return token, role, true
 }
 
@@ -1246,6 +1255,7 @@ func handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	defer cmd.Wait() // reap the docker process; otherwise it becomes a zombie + leaks FDs
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 	for scanner.Scan() {

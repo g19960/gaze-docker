@@ -1415,7 +1415,11 @@ function switchTab(tab){
   var loaders={images:loadImages,audit:loadAudit,compose:loadCompose,volumes:loadVolumes,networks:loadNetworks};
   if(tab==='containers'){
     cp.style.display='';
+    // resume the log stream if we were viewing one
+    if(activeId&&authToken&&!mockMode){connectWS(activeId);}
   }else if(document.getElementById(tab+'Panel')){
+    // leaving the containers view: stop the log stream so no backend docker logs -f lingers
+    closeWS();
     document.getElementById(tab+'Panel').classList.add('show');
     if(loaders[tab])loaders[tab]();
   }else{

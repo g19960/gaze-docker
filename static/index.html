@@ -876,12 +876,17 @@ async function loadContainers(){
   }catch(e){console.error(e);}
 }
 
+var lastListSig='';
 function render(list){
   var el=document.getElementById('list');
   renderedContainers=list.slice();
   document.getElementById('cntBadge').textContent=list.length+'/'+containers.length;
-  if(!list.length){el.innerHTML='<div class="loading">'+t('noContainers')+'</div>';return;}
+  if(!list.length){el.innerHTML='<div class="loading">'+t('noContainers')+'</div>';lastListSig='';return;}
   var admin=(authRole==='admin'||!authEnabled)&&!mockMode;
+  // signature: if nothing relevant changed since last render, skip DOM rebuild (avoids interrupting clicks)
+  var sig=admin+'|'+lang+'|'+list.map(function(c){return c.id+'/'+c.state+'/'+c.image+'/'+c.created+'/'+(c.id===activeId?1:0)+'/'+((window.healthMap||{})[c.id]||'')+'/'+(c.ports||'');}).join(',');
+  if(sig===lastListSig)return;
+  lastListSig=sig;
   el.innerHTML=list.map(function(c){
     var active=c.id===activeId?' active':'';
     var actions='';
@@ -991,15 +996,18 @@ function connectWS(id){
 }
 // session lost (token expired/invalid): clear token and re-enter per current auth config
 function handleSessionLost(){
+  var wasContainer=activeId;
   authToken='';authRole='';
   sessionStorage.removeItem('token');sessionStorage.removeItem('role');
   updateRolePill();updateImagesTab();updateAdminLoginBtn();
   // re-check auth: will re-enter as anonymous viewer if viewer passwordless, else show login
-  checkAuth();
+  checkAuth().then(function(){
+    // after session restored, reconnect the log stream we were viewing
+    if(wasContainer&&authToken&&activeId===wasContainer){connectWS(wasContainer);}
+  });
 }
 function scheduleReconnect(id,myEpoch){
   if(wsReconnectTimer)clearTimeout(wsReconnectTimer);
-  if(wsReconnectDelay>=30000){setWS('disconnected');return;}
   if(myEpoch!==wsEpoch){return;}
   var wait=wsReconnectDelay;
   wsReconnectDelay=Math.min(wsReconnectDelay*2,30000);

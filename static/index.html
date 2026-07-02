@@ -2008,15 +2008,24 @@ async function systemPrune(){
 }
 
 // Health
-async function loadHealth(){
-  var url='/api/containers/health';
-  if(authToken)url+='?token='+encodeURIComponent(authToken);
-  try{
-    var r=await fetch(url);
-    if(!r.ok)return;
-    window.healthMap=await r.json();
-    renderFiltered();
-  }catch(e){}
+// Derive health from the container Status field already delivered by the SSE
+// refresh stream ("Up X (healthy)" etc.) — avoids a separate /api/containers/health
+// poll that would re-run docker ps.
+function deriveHealth(){
+  var m={};
+  containers.forEach(function(c){
+    if(c.state!=='running'){return;}
+    var s=(c.status||'').toLowerCase(),h='none';
+    if(s.indexOf('(unhealthy)')>=0)h='unhealthy';
+    else if(s.indexOf('(healthy)')>=0)h='healthy';
+    else if(s.indexOf('(starting)')>=0)h='starting';
+    m[c.id]=h;
+  });
+  return m;
+}
+function loadHealth(){
+  window.healthMap=deriveHealth();
+  renderFiltered();
 }
 window.setInterval(function(){
   if(!mockMode&&document.getElementById('containersPanel').style.display!=='none')loadHealth();

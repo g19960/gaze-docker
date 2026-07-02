@@ -396,7 +396,24 @@ func parseSensitivity(labels string) bool {
 	return false
 }
 
-func listContainers(role string) ([]Container, error) {
+// Global short-TTL cache for `docker ps` so the SSE refresh stream, health poll,
+// and on-demand container list all share ONE docker invocation per window.
+// N concurrent clients no longer multiply the docker daemon load.
+var (
+	containerCacheMu   sync.Mutex
+	containerCacheAll  []Container // admin view (includes sensitive)
+	containerCacheTime time.Time
+)
+
+const containerCacheTTL = 3 * time.Second
+
+// listContainersRaw runs `docker ps` at most once per containerCacheTTL and returns the full list.
+func listContainersRaw() ([]Container, error) {
+	containerCacheMu.Lock()
+	defer containerCacheMu.Unlock()
+	if time.Since(containerCacheTime) < containerCacheTTL && containerCacheAll != nil {
+		return containerCacheAll, nil
+	}
 	cmd := exec.Command(
 		"docker", "ps", "-a",
 		"--format", "{{.ID}}\t{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.State}}\t{{.RunningFor}}\t{{.Labels}}\t{{.Ports}}",
@@ -405,7 +422,6 @@ func listContainers(role string) ([]Container, error) {
 	if err != nil {
 		return nil, fmt.Errorf("docker ps failed: %w", err)
 	}
-
 	var containers []Container
 	scanner := bufio.NewScanner(strings.NewReader(string(out)))
 	for scanner.Scan() {
@@ -413,17 +429,11 @@ func listContainers(role string) ([]Container, error) {
 		if len(parts) < 7 {
 			continue
 		}
-
 		sensitive := parseSensitivity(parts[6])
-		if sensitive && role != roleAdmin {
-			continue
-		}
-
 		ports := ""
 		if len(parts) >= 8 {
 			ports = parts[7]
 		}
-
 		containers = append(containers, Container{
 			ID:        parts[0],
 			Name:      parts[1],
@@ -435,12 +445,30 @@ func listContainers(role string) ([]Container, error) {
 			Sensitive: sensitive,
 		})
 	}
-
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("scan docker ps output failed: %w", err)
 	}
-
+	containerCacheAll = containers
+	containerCacheTime = time.Now()
 	return containers, nil
+}
+
+func listContainers(role string) ([]Container, error) {
+	all, err := listContainersRaw()
+	if err != nil {
+		return nil, err
+	}
+	if role == roleAdmin {
+		return all, nil
+	}
+	// viewer: filter sensitive containers in memory
+	out := make([]Container, 0, len(all))
+	for _, c := range all {
+		if !c.Sensitive {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 func hasAccessToContainer(role, containerID string) (bool, error) {
@@ -1798,7 +1826,31 @@ type ContainerStat struct {
 	PIDs   string  `json:"pids"`
 }
 
+// Cached container-level stats (docker stats --no-stream is expensive: it samples
+// every running container). Shared across all perf-panel clients within the TTL.
+var (
+	cStatsCacheMu   sync.Mutex
+	cStatsCache     []ContainerStat
+	cStatsCacheTime time.Time
+)
+
+const cStatsCacheTTL = 3 * time.Second
+
 func handleContainerStats(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	cStatsCacheMu.Lock()
+	if time.Since(cStatsCacheTime) < cStatsCacheTTL && cStatsCache != nil {
+		stats := cStatsCache
+		cStatsCacheMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(stats)
+		return
+	}
+	cStatsCacheMu.Unlock()
+
 	out, err := exec.Command("docker", "stats", "--no-stream", "--format", "{{.ID}}\t{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}\t{{.PIDs}}").Output()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1822,6 +1874,10 @@ func handleContainerStats(w http.ResponseWriter, r *http.Request) {
 			NetIO: parts[5], Block: parts[6], PIDs: parts[7],
 		})
 	}
+	cStatsCacheMu.Lock()
+	cStatsCache = stats
+	cStatsCacheTime = time.Now()
+	cStatsCacheMu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
 }
@@ -2159,7 +2215,22 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	_ = cmd.Wait()
 }
 
-func handleStats(w http.ResponseWriter, r *http.Request) {
+// Cached host stats refreshed at most every 5s to avoid hammering docker daemon
+// and the /proc/stat double-read (200ms) on every poll.
+var (
+	statsCacheMu   sync.Mutex
+	statsCache     ServerStats
+	statsCacheTime time.Time
+)
+
+const statsCacheTTL = 5 * time.Second
+
+func computeStats() ServerStats {
+	statsCacheMu.Lock()
+	defer statsCacheMu.Unlock()
+	if time.Since(statsCacheTime) < statsCacheTTL {
+		return statsCache
+	}
 	stats := ServerStats{CPUUsage: "0%", MemoryUsed: "-", MemoryTotal: "-", MemoryPct: "-", DiskUsed: "-", DiskTotal: "-", DiskPct: "-"}
 	if containers, err := listContainers(roleAdmin); err == nil {
 		stats.ContainersTotal = len(containers)
@@ -2222,6 +2293,13 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	statsCache = stats
+	statsCacheTime = time.Now()
+	return stats
+}
+
+func handleStats(w http.ResponseWriter, r *http.Request) {
+	stats := computeStats()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(stats)
 }

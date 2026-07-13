@@ -86,6 +86,10 @@ h1{font-size:13px;font-weight:500;letter-spacing:.15em;text-transform:uppercase;
 .line:hover{background:var(--hover-bg)}
 .line.hidden{display:none}
 mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
+.hl-tag{display:inline-flex;align-items:center;gap:3px;padding:2px 4px 2px 8px;border-radius:999px;font-size:10px;border:1px solid var(--border2);background:var(--bg3);color:var(--text)}
+.hl-tag-x{cursor:pointer;color:var(--text-muted);font-weight:700;padding:0 2px;line-height:1}
+.hl-tag-x:hover{color:var(--red)}
+.hl-box{display:flex;align-items:center;gap:4px;flex-wrap:wrap;max-width:340px}
 .filter-box{display:flex;align-items:center;gap:4px}
 .filter-input{width:160px;background:var(--bg3);border:1px solid var(--border2);border-radius:4px;padding:4px 8px;font-family:"JetBrains Mono","Cascadia Mono","Consolas",monospace;font-size:10px;color:var(--text);outline:none;transition:border-color .15s}
 .filter-input:focus{border-color:var(--green)}
@@ -285,6 +289,9 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
           <input class="filter-input" id="logFilter" type="text" placeholder="filter logs..." oninput="applyLogFilter()">
           <button class="btn" id="btnRegex" onclick="toggleRegex()">.*</button>
           <span class="match-count" id="matchCount"></span>
+        </div>
+        <div class="hl-box" id="hlBox">
+          <input class="filter-input" id="hlInput" type="text" placeholder="highlight (enter to add)..." style="width:150px" onkeydown="hlInputKey(event)">
         </div>
         <span class="lc" id="lc">0 lines</span>
         <div class="font-ctrl">
@@ -1152,6 +1159,48 @@ function applyFilterToLine(el){
     }
   }
   el.classList.toggle('hidden',!(levelOk&&textMatch));
+  applyHighlightTags(el);
+}
+// --- highlight tags (multi-keyword highlight, no filtering) ---
+var highlightTags=[];
+function hlInputKey(e){
+  if(e.key==='Enter'){
+    var v=e.target.value.trim();
+    if(v&&!highlightTags.includes(v)){highlightTags.push(v);renderHighlightTags();applyAllHighlight();}
+    e.target.value='';
+  }else if(e.key==='Backspace'&&!e.target.value&&highlightTags.length){
+    highlightTags.pop();renderHighlightTags();applyAllHighlight();
+  }
+}
+function removeHighlightTag(i){highlightTags.splice(i,1);renderHighlightTags();applyAllHighlight();}
+function renderHighlightTags(){
+  var box=document.getElementById('hlBox');
+  var input=document.getElementById('hlInput');
+  // remove existing tags, keep input
+  var tags=box.querySelectorAll('.hl-tag');tags.forEach(function(t){t.remove();});
+  highlightTags.forEach(function(tg,i){
+    var el=document.createElement('span');
+    el.className='hl-tag';
+    el.innerHTML=esc(tg)+'<span class="hl-tag-x" onclick="removeHighlightTag('+i+')">×</span>';
+    box.insertBefore(el,input);
+  });
+}
+function applyHighlightTags(lineEl){
+  if(!highlightTags.length)return;
+  var msgEl=lineEl.querySelector('.msg');
+  if(!msgEl)return;
+  var html=msgEl.innerHTML;
+  highlightTags.forEach(function(tg){
+    var safe=tg.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    try{html=html.replace(new RegExp('('+safe+')','gi'),'<mark>$1</mark>');}catch(e){}
+  });
+  msgEl.innerHTML=html;
+}
+function applyAllHighlight(){
+  document.querySelectorAll('#out .line').forEach(function(l){
+    // re-run filter to reset msg content, then re-apply tags
+    applyFilterToLine(l);
+  });
 }
 
 function applyLogFilter(){

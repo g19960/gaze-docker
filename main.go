@@ -373,6 +373,7 @@ type Container struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Image     string `json:"image"`
+	ImageSize string `json:"imageSize"`
 	Status    string `json:"status"`
 	State     string `json:"state"`
 	Created   string `json:"created"`
@@ -445,8 +446,25 @@ func listContainersRaw() ([]Container, error) {
 			Sensitive: sensitive,
 		})
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); nil != err {
 		return nil, fmt.Errorf("scan docker ps output failed: %w", err)
+	}
+	// attach image sizes: build repo:tag -> size map from a single `docker images`
+	imgSize := map[string]string{}
+	if imgOut, ierr := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}\t{{.Size}}").Output(); ierr == nil {
+		for _, line := range strings.Split(string(imgOut), "\n") {
+			fp := strings.Split(line, "\t")
+			if len(fp) < 3 {
+				continue
+			}
+			imgSize[fp[0]] = fp[2] // repo:tag
+			imgSize[fp[1]] = fp[2] // image id fallback
+		}
+	}
+	for i := range containers {
+		if sz, ok := imgSize[containers[i].Image]; ok {
+			containers[i].ImageSize = sz
+		}
 	}
 	containerCacheAll = containers
 	containerCacheTime = time.Now()
@@ -1634,6 +1652,7 @@ type ServerStats struct {
 	ContainersRunning int    `json:"containers_running"`
 	ContainersTotal   int    `json:"containers_total"`
 	ImagesCount       int    `json:"images_count"`
+	RunningImageSize  string `json:"running_image_size"`
 }
 
 func cleanTarPath(p string) string {
@@ -1754,6 +1773,35 @@ func parsePercent(v string) float64 {
 	v = strings.TrimSpace(strings.TrimSuffix(v, "%"))
 	f, _ := strconv.ParseFloat(v, 64)
 	return f
+}
+
+// parseSizeBytes parses docker's human size strings ("1.2GB", "500MB", "1.5kB") to bytes.
+func parseSizeBytes(s string) int64 {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" {
+		return 0
+	}
+	num := ""
+	unit := ""
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || c == '.' {
+			num += string(c)
+		} else {
+			unit = strings.TrimSpace(s[i:])
+			break
+		}
+	}
+	f, _ := strconv.ParseFloat(num, 64)
+	mul := map[string]float64{
+		"B": 1, "KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024, "TB": 1024 * 1024 * 1024 * 1024,
+		"kB": 1024,
+	}
+	u := strings.ToUpper(unit)
+	if m, ok := mul[u]; ok {
+		return int64(f * m)
+	}
+	return int64(f)
 }
 
 // humanSize formats bytes as a human-readable string (KB/MB/GB/TB).
@@ -2234,11 +2282,19 @@ func computeStats() ServerStats {
 	stats := ServerStats{CPUUsage: "0%", MemoryUsed: "-", MemoryTotal: "-", MemoryPct: "-", DiskUsed: "-", DiskTotal: "-", DiskPct: "-"}
 	if containers, err := listContainers(roleAdmin); err == nil {
 		stats.ContainersTotal = len(containers)
+		// sum image sizes of running containers (dedup by image ref)
+		var runImgBytes int64
+		seenImg := map[string]bool{}
 		for _, c := range containers {
 			if c.State == "running" {
 				stats.ContainersRunning++
+				if c.Image != "" && !seenImg[c.Image] {
+					seenImg[c.Image] = true
+					runImgBytes += parseSizeBytes(c.ImageSize)
+				}
 			}
 		}
+		stats.RunningImageSize = humanSize(runImgBytes)
 	}
 	if images, err := listImages(); err == nil {
 		stats.ImagesCount = len(images)

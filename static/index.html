@@ -254,6 +254,7 @@ mark{background:var(--yellow);color:var(--text);border-radius:2px;padding:0 1px}
   <div class="stat-card"><span class="stat-label">DISK</span><span class="stat-val" id="statDisk">-</span></div>
   <div class="stat-card"><span class="stat-label">CONTAINERS</span><span class="stat-val" id="statContainers">-</span></div>
   <div class="stat-card"><span class="stat-label">IMAGES</span><span class="stat-val" id="statImages">-</span></div>
+  <div class="stat-card"><span class="stat-label">RUNNING IMG</span><span class="stat-val" id="statRunImg">-</span></div>
   <button class="btn" style="margin-left:auto" onclick="showAlertRulesModal()">rules</button>
   <button class="btn-danger" onclick="systemPrune()">prune</button>
 </div>
@@ -918,7 +919,8 @@ function render(list){
     return '<div class="item'+active+'" data-id="'+esc(c.id)+'" data-name="'+esc(c.name)+'">'+
       '<div class="item-name">'+esc(c.name)+'</div>'+
       '<div class="item-meta"><span class="badge '+c.state+'">'+c.state+'</span>'+healthDot(c.id)+
-      '<span class="img-text">'+esc(c.image)+'</span></div>'+
+      '<span class="img-text">'+esc(c.image)+'</span>'+
+      (c.imageSize?'<span style="font-size:9px;color:var(--text-muted);margin-left:auto">'+esc(c.imageSize)+'</span>':'')+'</div>'+
       (c.ports?'<div class="item-meta" style="margin-top:3px;font-size:9px;color:var(--cyan)">'+esc(c.ports.substring(0,60))+'</div>':'')+
       '<div class="item-meta" style="margin-top:3px;font-size:10px;color:var(--text-muted)">'+esc(c.created)+'</div>'+actions+
       '</div>';
@@ -2203,6 +2205,7 @@ async function loadStats(){
     document.getElementById('statDisk').textContent=s.disk_used+'/'+s.disk_total+' ('+s.disk_pct+')';
     document.getElementById('statContainers').textContent=s.containers_running+'/'+s.containers_total;
     document.getElementById('statImages').textContent=s.images_count;
+    document.getElementById('statRunImg').textContent=s.running_image_size||'-';
   }catch(e){}
 }
 setInterval(function(){
